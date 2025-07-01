@@ -608,6 +608,7 @@ def _main_impl(args):
     else:
         combined_songs = filtered
 
+    random.shuffle(combined_songs)  # Shuffle to randomise order
     print(f"→ Generating playlist ({len(combined_songs)} candidate songs)…")
 
     # We need at least args.min_songs tracks in total → derive a ratio
