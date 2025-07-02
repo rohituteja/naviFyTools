@@ -22,6 +22,12 @@ A set of utilities for syncing playlists between Subsonic/Navidrome and Spotify 
 [music_directory]
 MUSIC_DIR = <path to your music directory here>
 
+[llm]
+# Set the default LLM backend and model for naviDJ.py, "ollama" or "openai"
+MODE = openai
+# e.g. gpt-4o-mini, gpt-3.5-turbo, deepseek-r1:latest, gemma3n:latest, etc.
+MODEL = gpt-4o-mini
+
 [openai]
 OPENAI_KEY = <your-openai-api-key>
 
@@ -40,7 +46,7 @@ SCOPE = user-read-private user-read-playback-state user-library-read user-librar
 CLIENT_ID = <your-spotify-client-id>
 CLIENT_SECRET = <your-spotify-client-secret>
 REDIRECT_URI = http://localhost/
-CACHE_PATH = .cache-bidisync
+CACHE_PATH = .cache-spotify
 ```
 
 An example file for you to use and rename has also been provided.
@@ -60,9 +66,10 @@ The playlist sync script does attempt to sync over playlist images, however Navi
 ### naviDJ.py
 Generate a playlist using AI:
 ```
-python naviDJ.py --playlist_name "My Playlist" --prompt "energetic summer road trip" --min_songs 40 --llm_mode openai
+python naviDJ.py --playlist_name "My Playlist" --prompt "energetic summer road trip" --min_songs 40 --llm_mode openai --llm_model gpt-4o-mini
 ```
 - If arguments are omitted, the script will prompt for them interactively, with a default playlist name of "naviDJ".
+- You can set the default LLM backend and model in `secrets.txt` under the `[llm]` section. Command-line arguments override these defaults.
 
 ### portLibrary.py
 Sync playlists and likes between Spotify and Subsonic:

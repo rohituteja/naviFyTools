@@ -41,6 +41,9 @@ secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 DEFAULT_OPENAI_KEY = secrets.get("openai", "OPENAI_KEY", fallback=None)
 DEFAULT_OLLAMA_BASE = secrets.get("ollama", "OLLAMA_BASE", fallback=None)
 
+DEFAULT_LLM_MODE = secrets.get("llm", "MODE", fallback="openai").lower()
+DEFAULT_LLM_MODEL = secrets.get("llm", "MODEL", fallback=None)
+
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)
 SUBSONIC_AUTH_PARAMS = {
     "u": secrets.get("subsonic", "USER", fallback=None),
@@ -50,8 +53,8 @@ SUBSONIC_AUTH_PARAMS = {
 }
 
 # Will be overwritten in `configure_llm` but need a placeholder so _llm_chat can be defined early.
-LLM_MODE: str = "openai"  # 'openai' | 'ollama'
-LLM_MODEL: str = ""  # auto‑filled later
+LLM_MODE: str = DEFAULT_LLM_MODE  # 'openai' | 'ollama'
+LLM_MODEL: str = DEFAULT_LLM_MODEL or ""  # auto‑filled later
 client: OpenAI | None = None  # global client instance
 
 # --------------------------------------------------
@@ -68,26 +71,29 @@ def _remove_think_tags(text: str) -> str:
 # LLM CLIENT INITIALISATION
 # --------------------------------------------------
 
-def configure_llm(mode: str) -> None:
-    """Initialise the global `client`, `LLM_MODE`, and `LLM_MODEL` based on *mode*."""
+def configure_llm(mode: str = None, model: str = None) -> None:
+    """Initialise the global `client`, `LLM_MODE`, and `LLM_MODEL` based on *mode* and *model*."""
     global LLM_MODE, LLM_MODEL, client
 
-    mode = mode.lower()
+    # Use secrets.txt defaults if not provided
+    mode = (mode or DEFAULT_LLM_MODE or "openai").lower()
+    model = model or DEFAULT_LLM_MODEL
+
     if mode not in {"openai", "ollama"}:
         raise ValueError("Unsupported LLM_MODE. Choose 'openai' or 'ollama'.")
 
     LLM_MODE = mode
 
     if mode == "openai":
-        LLM_MODEL = "gpt-4o-mini"
+        LLM_MODEL = model or "gpt-4o-mini"
         client = OpenAI(api_key=DEFAULT_OPENAI_KEY)
     else:  # ollama
-        LLM_MODEL = "deepseek-r1:latest"  # e.g. 'llama3' or 'mistral-7b-instruct'
+        LLM_MODEL = model or "gemma3n:latest"  # e.g. 'llama3' or 'mistral-7b-instruct'
         # Ollama’s shim at /v1 is OpenAI‑compatible; any string works as the key.
         client = OpenAI(api_key="ollama", base_url=DEFAULT_OLLAMA_BASE)
 
 # --------------------------------------------------
-# SUBSONIC HELPERS  (unchanged)
+# SUBSONIC HELPERS
 # --------------------------------------------------
 
 def fetch_starred_ids() -> set[str]:
@@ -147,17 +153,6 @@ def _llm_chat(messages: list[dict]) -> str:
     """Universal chat helper that works for both OpenAI & Ollama and always returns clean JSON-only content."""
 
     extra_args: dict[str, object] = {}
-
-    # if LLM_MODE == "ollama":
-        # Local models tend to ramble; keep them concise.
-        # extra_args["temperature"] = 0.2
-        #
-        # ⚠️  Do NOT pass non-standard keys like `think` or `options` here – the
-        # OpenAI-python client validates arguments locally and will raise
-        # TypeError before any request reaches the Ollama server.  If you need
-        # advanced generation control, call Ollama’s native /generate endpoint
-        # or encode parameters in the model name (e.g.  "qwen3:4b?num_predict=1024").
-
     # Ask for structured JSON output whenever the backend supports it.
     extra_args["response_format"] = {"type": "json_object"}
 
@@ -199,7 +194,7 @@ def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[
         "role": "system",
         "content": (
             f"You are a music‑curation assistant. Given a vibe prompt and a list of {label}, "
-            f"return up to {n} {label} from the list that best fit the vibe, as a JSON array of strings."
+            f"return exactly {n} {label} from the list that best fit the vibe, as a JSON array of strings."
             f"Print the objects EXACTLY as listed in the input you are given."
             f"If the prompt specifically mentions anything/anyone in the list, be SURE to include it, "
             f"but do not include ANY items that are not in the list. If it makes sense to terminate the "
@@ -226,7 +221,7 @@ def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[
     return items[:n]
 
 # --------------------------------------------------
-# PLAYLIST GENERATION – updated prompt
+# PLAYLIST GENERATION
 # --------------------------------------------------
 
 def chunk_list(lst, size):
@@ -249,20 +244,26 @@ def generate_playlist(
     for chunk in chunk_list(songs, chunk_size):
         chunk_json = json.dumps(chunk).replace("```", "`\u200c`\u200c`")
 
-        # 🎯  How many songs must this chunk contribute?
+        # How many songs must this chunk contribute?
         min_needed = max(1, math.ceil(len(chunk) * required_ratio))
+
+        # Randomly chosen diversity options to slightly bias the selection a little differently each time.
+        diversity_options = ["Slightly prefer songs where 'starred' IS true, as long as they fit the vibe.",
+                             "Slightly prefer songs where 'starred' IS NOT true, as long as they fit the vibe.",
+                             "Slightly prefer songs from MORE popular artists, as long as they fit the vibe.",
+                             "Slightly prefer songs from LESS popular artists, as long as they fit the vibe."]
 
         sys_msg = {
             "role": "system",
             "content": (
                 "You are a playlist‑builder AI.\n"
                 "Rules (apply across the FINAL playlist, not just this chunk):\n"
-                "• Slightly prefer songs where 'starred' is true, as long as they fit the vibe. This is not a requirement.\n"
-                "• Ensure artist diversity – ensure a healthy mix of all artists, unless a specific one has been requested.\n"
+                f"• {random.choice(diversity_options)} This is not a requirement.\n"
+                "• Ensure artist diversity – ensure a healthy mix of all artists you see, UNLESS specific artists have been requested.\n"
                 "• Obey the guideline and output schema exactly.\n"
                 "• Return exactly one JSON object like:\n"
                 '{"playlist": [{{"id": "…", "title": "…"}}, …]}\n'
-                f"• **Include at least {min_needed} song(s) from this chunk.**\n"
+                f"• **Include AT LEAST {min_needed} song(s) from this chunk.**\n"
                 "• No other keys, arrays, or commentary.\n"
                 "• Do not wrap your response in triple-backticks.\n"
             ),
@@ -271,7 +272,7 @@ def generate_playlist(
         user_msg = {
             "role": "user",
             "content": (
-                f"Vibe prompt: {prompt}\n\nSelect any songs from the list below, honoring the rules above. Return the song id and titles EXACTLY as provided in the list of available songs.\n"
+                f"Vibe prompt: {prompt}\n\nSelect songs from the given options. Return the song id and titles of songs to include EXACTLY as provided in the list of available songs.\n"
                 f"Available songs: {chunk_json}\n\nReply with JSON **only** in the format described above."
             ),
         }
@@ -281,7 +282,7 @@ def generate_playlist(
             parsed = json.loads(raw)
             picked = parsed.get("playlist", [])
 
-            # If the model under-delivered, pad with random extras from this chunk
+            # If the model still under-delivered, pad with random extras from this chunk
             if len(picked) < min_needed:
                 remaining = [
                     s for s in chunk
@@ -302,7 +303,7 @@ def generate_playlist(
     return playlist
 
 # --------------------------------------------------
-# PLAYLIST PUSH/UPDATE HELPERS (unchanged)
+# PLAYLIST PUSH/UPDATE HELPERS
 # --------------------------------------------------
 
 def _update_playlist_on_server(name: str, song_ids: list[str], description: str) -> bool:
@@ -341,7 +342,7 @@ def _update_playlist_on_server(name: str, song_ids: list[str], description: str)
     return True
 
 # --------------------------------------------------
-# SUBSONIC BROWSING HELPERS  🆕
+# SUBSONIC BROWSING HELPERS
 # --------------------------------------------------
 def fetch_all_artists() -> list[str]:
     """Return every artist name known to the server (1 per entry)."""
@@ -399,7 +400,7 @@ def fetch_playlist_songs(playlist_id: str) -> list[dict]:
     return [{"id": t["id"], "title": t["title"], "artist": t["artist"]} for t in tracks]
 
 # --------------------------------------------------
-# 🔎  PROMPT ARTIST EXTRACTION
+# PROMPT ARTIST EXTRACTION
 # --------------------------------------------------
 
 def extract_prompt_artists(prompt: str, all_artists: list[str]) -> list[str]:
@@ -482,7 +483,7 @@ def ensure_min_songs(playlist: list[dict], candidates: list[dict], min_songs: in
     return playlist[:max_songs]
 
 # --------------------------------------------------
-# 🧹  PLAYLIST ENTRY SANITISER
+# PLAYLIST ENTRY SANITISER
 # --------------------------------------------------
 
 def _sanitize_playlist(entries: List[dict], candidates: List[dict]) -> List[dict]:
@@ -502,7 +503,7 @@ def _sanitize_playlist(entries: List[dict], candidates: List[dict]) -> List[dict
     for e in entries:
         if not isinstance(e, dict):
             continue
-        if "id" in e:                       # already good
+        if "id" in e:
             cleaned.append(e)
             continue
         key = (e.get("title", "").lower(), e.get("artist", "").lower())
@@ -528,17 +529,17 @@ def _main_impl(args):
         print("No songs found on the server.")
         return
 
-    # Fetch all existing playlists
     existing_playlists = fetch_all_playlists()
-
-    # Select context playlist songs (separate list)
+    # Select context playlist songs
     context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs)
 
     # Fetch full library artists/genres
     all_artists = fetch_all_artists()
+    random.shuffle(all_artists)  # Shuffle to randomise order
     all_genres = fetch_all_genres()
+    random.shuffle(all_genres)
 
-    # Extract artists/genres from context playlist (weighted highest)
+    ## Extract artists/genres from context playlist (weighted highest)
 
     # Split artist strings on commas/semicolons and strip whitespace
     artists = []
@@ -551,6 +552,7 @@ def _main_impl(args):
                 if name:
                     artists.append(name)
     context_artists = list(dict.fromkeys(artists))
+    random.shuffle(context_artists)
 
     # Extract genres from context playlist (splitting multi-genre strings)
     # Normalize separators and split on commas/semicolons
@@ -563,15 +565,15 @@ def _main_impl(args):
                 if name:
                     genres.append(name)
     context_genres = list(dict.fromkeys(genres))
+    random.shuffle(context_genres)
 
-    # Stricter artist/genre counts when no context playlist
+    num_artists: int = 30
+    num_genres:  int = 50
 
-    num_artists: int = 25
-    num_genres:  int = 40
-
+    # Higher artist/genre counts when no context playlist to base off
     if not context_songs:
-        num_artists = int(num_artists * 1.5)  # 38
-        num_genres  = int(num_genres  * 2)    # 80
+        num_artists = int(num_artists * 1.5)  # 45
+        num_genres  = int(num_genres  * 1.5)  # 75
         
 
     # First, collect any artists explicitly mentioned in the prompt
@@ -584,13 +586,13 @@ def _main_impl(args):
         focus_artists = init_focus_artists
         focus_genres = init_focus_genres
     else:
-        focus_artists = select_top_items(prompt, list(set(context_artists + init_focus_artists)), 15, "artists")
-        focus_genres = select_top_items(prompt, list(set(context_genres + init_focus_genres)), 25, "genres")
+        focus_artists = select_top_items(prompt, list(set(context_artists + init_focus_artists)), int(num_artists * .8), "artists")
+        focus_genres = select_top_items(prompt, list(set(context_genres + init_focus_genres)), int(num_genres * .8), "genres")
 
-    # 🚨  Ensure prompt-named artists lead the list and aren’t dropped by truncation
+    # Ensure prompt-named artists lead the list and aren’t dropped by truncation
     if explicit_prompt_artists:
         ordered = explicit_prompt_artists + [a for a in focus_artists if a not in explicit_prompt_artists]
-        focus_artists = ordered[: max(num_artists, len(explicit_prompt_artists))]
+        focus_artists = ordered[: num_artists + len(explicit_prompt_artists)]
 
     print("🎯 Focus artists:", ", ".join(focus_artists))
     print("🎯 Focus genres: ", ", ".join(focus_genres))
@@ -624,7 +626,7 @@ def _main_impl(args):
     print(f"🎶 Generated {len(playlist_items)} tracks from {len(combined_songs)} candidates.")
     playlist_items = ensure_min_songs(playlist_items, combined_songs, args.min_songs)
 
-    # 🧹  Resolve any entries missing an 'id' before upload
+    # Resolve any entries missing an 'id' before upload
     playlist_items = _sanitize_playlist(playlist_items, combined_songs)
 
     if not playlist_items:
@@ -643,12 +645,9 @@ if __name__ == "__main__":
     parser.add_argument("--playlist_name", type=str, default="naviDJ", help="Name of the playlist to create or update.")
     parser.add_argument("--prompt", type=str, help="Vibe prompt for the playlist.")
     parser.add_argument("--min_songs", type=int, default=35, help="Minimum number of songs in the playlist.")
-    parser.add_argument("--llm_mode", type=str, choices=["openai", "ollama"], default=LLM_MODE, help="Which LLM backend to use.")
+    parser.add_argument("--llm_mode", type=str, choices=["openai", "ollama"], default=DEFAULT_LLM_MODE, help="Which LLM backend to use (overrides secrets.txt).")
+    parser.add_argument("--llm_model", type=str, default=DEFAULT_LLM_MODEL, help="Which LLM model to use (overrides secrets.txt).")
     args = parser.parse_args()
 
-    # Configure the language model **before** anything else touches it.
-    configure_llm(args.llm_mode)
-
-    # From here on the original `main` logic continues, unchanged. For brevity
-    # call the existing `main()` implementation renamed to `_main_impl(args)`.
+    configure_llm(args.llm_mode, args.llm_model)
     _main_impl(args)
