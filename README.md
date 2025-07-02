@@ -68,7 +68,7 @@ Generate a playlist using AI:
 ```
 python naviDJ.py --playlist_name "My Playlist" --prompt "energetic summer road trip" --min_songs 40 --llm_mode openai --llm_model gpt-4o-mini
 ```
-- If arguments are omitted, the script will prompt for them interactively, with a default playlist name of "naviDJ".
+- If arguments are omitted, the script will use it's defaults or prompt for them interactively if need be. The default playlist name is "naviDJ".
 - You can set the default LLM backend and model in `secrets.txt` under the `[llm]` section. Command-line arguments override these defaults.
 
 ### portLibrary.py
@@ -77,6 +77,7 @@ Sync playlists and likes between Spotify and Subsonic:
 python portLibrary.py --sync-starred y --sync-playlists y --import-liked y --import-playlists y --playlists "Playlist1,Playlist2"
 ```
 - If arguments are omitted, the script will prompt for them interactively.
+- NOTE: By default, this script is designed to ignore syncing playlists named 'naviDJ'. With how this works, when syncing TO Spotify, the script will simply add "missing" songs, so if you use the DJ with a different playlist name, instead of porting the updated version to Spotify and replacing it, it will simply keep appending the songs in the playlist. 
 
 ### portGenres.py
 Update genres for your local music library using MusicBrainz:
@@ -84,6 +85,7 @@ Update genres for your local music library using MusicBrainz:
 python portGenres.py /path/to/your/music --dry-run
 ```
 - Omit `--dry-run` to actually write changes.
+- This script is meant to run on your music files and edit the genre tags for them, grabbing the information from MusicBrainz and defaulting to whatever you have in the file already as a fallback. The DJ script was optimized based on the genre variety that is provided by this script, however it should work regardless so don't feel the need to update your metadata unncessarily. The way the DJ script filters songs will be impacted by the diversity of the genres you tagged your music with, feel free to share your experiences with how it works!
 
 ---
 
