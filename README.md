@@ -8,6 +8,24 @@ A set of utilities for syncing playlists between Subsonic/Navidrome and Spotify 
 - **portLibrary.py**: Syncs starred/liked songs and playlists between Spotify and Subsonic/Navidrome (both directions).
 - **portGenres.py**: Updates local music file genres using MusicBrainz tags. The DJ script uses genres to filter songs by, and more detailed genres, such as those from MusicBrainz, helps it filter more effectively, but by no means am I asking you to overwrite all your genres on your files to use these scripts. I'd be interested to see how the DJ performs with different types of metadata and how people tag their genres.
 
+## Web App (Flask UI)
+
+A simple web interface is now available for managing your naviFy tools!
+
+- **Run the web app:**
+  ```
+  python app.py
+  ```
+- Open your browser to [http://localhost:5000](http://localhost:5000)
+- Features:
+  - Edit your `secrets.txt` configuration from the web UI
+  - Run the AI DJ (naviDJ.py) and Library Porter (portLibrary.py) from your browser
+  - View real-time output from scripts in the browser
+
+**Disclaimer:**
+- The web app does _not_ handle Spotify authentication (OAuth) in the browser. The first time you sync with Spotify, you must run the sync script from the command line and complete the authentication in your browser when prompted. After that, the web app can be used for subsequent syncs as long as your Spotify token remains valid.
+- You must have a valid `secrets.txt` file set up before using the web app.
+
 ---
 
 ## Setup

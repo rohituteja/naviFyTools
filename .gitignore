@@ -1,3 +1,4 @@
 # Ignore secrets and config files containing credentials
 secrets.txt
 .cache-spotify
+__pycache__/

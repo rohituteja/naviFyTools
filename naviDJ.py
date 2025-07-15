@@ -296,7 +296,7 @@ def generate_playlist(
 
             playlist.extend(picked)
         except Exception as e:
-            print(f"⚠️ JSON parse error – {e}. Raw start: {raw[:120]}")
+            print(f"WARNING: JSON parse error – {e}. Raw start: {raw[:120]}")
         bar.update(len(chunk))
     bar.close()
 
@@ -319,7 +319,7 @@ def _update_playlist_on_server(name: str, song_ids: list[str], description: str)
             params={**SUBSONIC_AUTH_PARAMS, "playlistId": plid, "songId": song_ids},
         )
         if upd.status_code != 200:
-            print("❌ Failed to update existing playlist tracks.")
+            print("ERROR: Failed to update existing playlist tracks.")
             return False
     else:
         upd = requests.get(
@@ -327,7 +327,7 @@ def _update_playlist_on_server(name: str, song_ids: list[str], description: str)
             params={**SUBSONIC_AUTH_PARAMS, "name": name, "songId": song_ids},
         )
         if upd.status_code != 200:
-            print("❌ Failed to create playlist.")
+            print("ERROR: Failed to create playlist.")
             return False
         root = ET.fromstring(upd.content)
         plid = root.find(f".//{ns}playlist").get("id")
@@ -337,7 +337,7 @@ def _update_playlist_on_server(name: str, song_ids: list[str], description: str)
         params={**SUBSONIC_AUTH_PARAMS, "playlistId": plid, "comment": description},
     )
     if desc_upd.status_code != 200:
-        print("⚠️ Tracks updated but could not set description.")
+        print("ERROR: Tracks updated but could not set description.")
 
     return True
 
@@ -453,7 +453,7 @@ def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], a
         parsed = json.loads(raw)
         playlist_name = parsed.get("playlist_name", "").strip()
     except Exception as e:
-        print(f"⚠️ JSON parse error – {e}. Raw start: {raw[:120]}")
+        print(f"WARNING: JSON parse error – {e}. Raw start: {raw[:120]}")
         playlist_name = ""
     if not playlist_name:
         return []
@@ -523,12 +523,13 @@ def _main_impl(args):
         print("Prompt required – exiting.")
         return
 
-    print("→ Fetching library…")
+    print("Fetching library…")
     all_songs = fetch_all_subsonic_songs()
     if not all_songs:
         print("No songs found on the server.")
         return
 
+    print("\nChoosing context...")
     existing_playlists = fetch_all_playlists()
     # Select context playlist songs
     context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs)
@@ -594,8 +595,8 @@ def _main_impl(args):
         ordered = explicit_prompt_artists + [a for a in focus_artists if a not in explicit_prompt_artists]
         focus_artists = ordered[: num_artists + len(explicit_prompt_artists)]
 
-    print("🎯 Focus artists:", ", ".join(focus_artists))
-    print("🎯 Focus genres: ", ", ".join(focus_genres))
+    print("Focus artists:", ", ".join(focus_artists))
+    print("Focus genres: ", ", ".join(focus_genres))
 
     # Filter library based on focus
     filtered = [s for s in all_songs if (s["artist"] in focus_artists) and (s.get("genre") in focus_genres)]
@@ -611,7 +612,7 @@ def _main_impl(args):
         combined_songs = filtered
 
     random.shuffle(combined_songs)  # Shuffle to randomise order
-    print(f"→ Generating playlist ({len(combined_songs)} candidate songs)…")
+    print(f"Generating playlist ({len(combined_songs)} candidate songs)…")
 
     # We need at least args.min_songs tracks in total → derive a ratio
     required_ratio = args.min_songs / max(1, len(combined_songs))
@@ -623,7 +624,7 @@ def _main_impl(args):
         chunk_size=chunk_size,
         required_ratio=required_ratio,
     )
-    print(f"🎶 Generated {len(playlist_items)} tracks from {len(combined_songs)} candidates.")
+    print(f"Generated {len(playlist_items)} tracks from {len(combined_songs)} candidates.")
     playlist_items = ensure_min_songs(playlist_items, combined_songs, args.min_songs)
 
     # Resolve any entries missing an 'id' before upload
@@ -633,12 +634,12 @@ def _main_impl(args):
         print("LLM returned an empty playlist.")
         return
 
-    print(f"✅ Got {len(playlist_items)} tracks. Pushing to server…")
+    print(f"Got {len(playlist_items)} tracks. Pushing to server…")
     song_ids = [t["id"] for t in playlist_items]
     if _update_playlist_on_server(playlist_name, song_ids, prompt):
-        print(f"🎉 Playlist '{playlist_name}' updated!")
+        print(f"SUCCESS: Playlist '{playlist_name}' updated!")
     else:
-        print("❌ Failed to update playlist on server.")
+        print("ERROR: Failed to update playlist on server.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate a playlist based on a vibe prompt.")

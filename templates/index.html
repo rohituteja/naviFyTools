@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NaviFy Tools Manager</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .output-container {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            height: 300px;
+            overflow-y: auto;
+            margin-top: 20px;
+        }
+        .config-section {
+            margin-bottom: 20px;
+        }
+        .tab-content {
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <h1>NaviFy Tools Manager</h1>
+        
+        <!-- Configuration Section -->
+        <div class="card mb-4">
+            <div class="card-header" data-bs-toggle="collapse" data-bs-target="#configSection" style="cursor: pointer;">
+                <h5 class="mb-0">Configuration Settings</h5>
+            </div>
+            <div id="configSection" class="collapse">
+                <div class="card-body">
+                    <form id="configForm">
+                        {% for section in config.sections() %}
+                        <div class="config-section">
+                            <h5>{{ section }}</h5>
+                            {% for key, value in config[section].items() %}
+                            <div class="mb-3">
+                                <label class="form-label">{{ key }}</label>
+                                <input type="text" class="form-control" 
+                                       name="{{ section }}.{{ key }}"
+                                       value="{{ value }}"
+                                       data-section="{{ section }}"
+                                       data-key="{{ key }}">
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% endfor %}
+                        <button type="submit" class="btn btn-primary">Save Configuration</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabs Section -->
+        <ul class="nav nav-tabs" role="tablist">
+            <li class="nav-item">
+                <a class="nav-link active" data-bs-toggle="tab" href="#djTab">NaviDJ</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" data-bs-toggle="tab" href="#libraryTab">Library Porter</a>
+            </li>
+        </ul>
+
+        <div class="tab-content">
+            <!-- DJ Tab -->
+            <div id="djTab" class="tab-pane fade show active">
+                <form id="djForm">
+                    <div class="mb-3">
+                        <label class="form-label">Playlist Name</label>
+                        <input type="text" class="form-control" name="playlist_name" value="naviDJ">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Prompt</label>
+                        <textarea class="form-control" name="prompt" rows="3" required></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Minimum Songs</label>
+                        <input type="number" class="form-control" name="min_songs" value="35">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">LLM Mode</label>
+                        <select class="form-control" name="llm_mode">
+                            <option value="openai">OpenAI</option>
+                            <option value="ollama">Ollama</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">LLM Model (optional)</label>
+                        <input type="text" class="form-control" name="llm_model">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Run DJ</button>
+                </form>
+                <div class="output-container" id="djOutput"></div>
+            </div>
+
+            <!-- Library Tab -->
+            <div id="libraryTab" class="tab-pane fade">
+                <form id="libraryForm">
+                    <div class="mb-3">
+                        <label class="form-label">Sync Starred Songs</label>
+                        <select class="form-control" name="sync_starred">
+                            <option value="n">No</option>
+                            <option value="y">Yes</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Sync Playlists</label>
+                        <select class="form-control" name="sync_playlists">
+                            <option value="n">No</option>
+                            <option value="y">Yes</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Import Liked Songs</label>
+                        <select class="form-control" name="import_liked">
+                            <option value="n">No</option>
+                            <option value="y">Yes</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Import Playlists</label>
+                        <select class="form-control" name="import_playlists">
+                            <option value="n">No</option>
+                            <option value="y">Yes</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Playlists (comma-separated)</label>
+                        <input type="text" class="form-control" name="playlists">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Run Library Porter</button>
+                </form>
+                <div class="output-container" id="libraryOutput"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Configuration form handling
+        document.getElementById('configForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const config = {};
+            
+            for (let [key, value] of formData.entries()) {
+                const [section, field] = key.split('.');
+                if (!config[section]) config[section] = {};
+                config[section][field] = value;
+            }
+            
+            try {
+                const response = await fetch('/update_config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                const result = await response.json();
+                if (result.status === 'success') {
+                    alert('Configuration updated successfully!');
+                } else {
+                    alert('Error updating configuration: ' + result.message);
+                }
+            } catch (error) {
+                alert('Error updating configuration: ' + error);
+            }
+        });
+
+        // Helper function to handle script execution and output streaming
+        function handleScriptExecution(formId, outputId, endpoint) {
+            document.getElementById(formId).addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const form = e.target;
+                const outputDiv = document.getElementById(outputId);
+                outputDiv.innerHTML = '';
+                
+                const formData = new FormData(form);
+                const data = {};
+                for (let [key, value] of formData.entries()) {
+                    data[key] = value;
+                }
+                
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                    const result = await response.json();
+                    
+                    if (result.task_id) {
+                        const eventSource = new EventSource(`/stream/${result.task_id}`);
+                        
+                        eventSource.onmessage = (event) => {
+                            let line = event.data;
+
+                            // Detect progress bar lines (tqdm or similar)
+                            // This is a simple heuristic: adjust as needed for your output
+                            const isProgressBar = (line.includes('|') && /\d+%\|/.test(line)) || line.includes('song/s') || line.includes('Building playlist:');
+
+                            if (isProgressBar) {
+                                // Overwrite the last line
+                                const lines = outputDiv.innerHTML.split('<br>');
+                                if (lines.length > 1) {
+                                    lines[lines.length - 1] = line;
+                                    outputDiv.innerHTML = lines.join('<br>');
+                                } else {
+                                    outputDiv.innerHTML = line + '<br>';
+                                }
+                            } else {
+                                // Normal output: append as new line
+                                outputDiv.innerHTML += line + '<br>';
+                            }
+                            outputDiv.scrollTop = outputDiv.scrollHeight;
+                        };
+                        
+                        eventSource.onerror = () => {
+                            eventSource.close();
+                        };
+                    }
+                } catch (error) {
+                    outputDiv.innerHTML += 'Error: ' + error + '<br>';
+                }
+            });
+        }
+
+        // Set up form handlers
+        handleScriptExecution('djForm', 'djOutput', '/run_dj');
+        handleScriptExecution('libraryForm', 'libraryOutput', '/run_library');
+
+        // Bootstrap tab handling
+        var triggerTabList = [].slice.call(document.querySelectorAll('a[data-bs-toggle="tab"]'))
+        triggerTabList.forEach(function (triggerEl) {
+            var tabTrigger = new bootstrap.Tab(triggerEl)
+            triggerEl.addEventListener('click', function (event) {
+                event.preventDefault()
+                tabTrigger.show()
+            })
+        })
+    </script>
+</body>
+</html>
