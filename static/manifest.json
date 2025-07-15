@@ -1,0 +1,21 @@
+{
+  "name": "naviFy Tools Manager",
+  "short_name": "naviFy",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#222233",
+  "theme_color": "#222233",
+  "description": "Manage and DJ your music with naviFy tools.",
+  "icons": [
+    {
+      "src": "/DJ.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/DJ.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+} 

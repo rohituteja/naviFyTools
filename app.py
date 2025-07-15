@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, send_from_directory
 import configparser
 import os
 import sys
@@ -148,6 +148,14 @@ def stream(task_id):
         del output_queues[task_id]
         
     return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(os.path.join(app.root_path, ''), 'DJ.png', mimetype='image/png')
+
+@app.route('/DJ.png')
+def dj_icon():
+    return send_from_directory(os.path.join(app.root_path, ''), 'DJ.png', mimetype='image/png')
 
 if __name__ == '__main__':
     app.run(debug=True)

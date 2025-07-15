@@ -26,6 +26,9 @@ A simple web interface is now available for managing your naviFy tools!
 - The web app does _not_ handle Spotify authentication (OAuth) in the browser. The first time you sync with Spotify, you must run the sync script from the command line and complete the authentication in your browser when prompted. After that, the web app can be used for subsequent syncs as long as your Spotify token remains valid.
 - You must have a valid `secrets.txt` file set up before using the web app.
 
+> **Heads up:**
+> You can serve this Flask app and, using tools like [Tailscale](https://tailscale.com/), make it accessible over HTTPS. This enables installable PWA (Progressive Web App) features on mobile and desktop browsers.
+
 ---
 
 ## Setup

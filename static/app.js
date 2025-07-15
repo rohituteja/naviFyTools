@@ -153,3 +153,14 @@ if (djOptionsCollapse && djOptionsTriangle && djOptionsHeader) {
         bsCollapse.hide();
     }
 } 
+
+if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
+  window.addEventListener('load', function() {
+    navigator.serviceWorker.register('/static/service-worker.js').then(function(registration) {
+      // Registration successful
+    }, function(err) {
+      // Registration failed
+      console.warn('ServiceWorker registration failed: ', err);
+    });
+  });
+} 
