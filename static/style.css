@@ -1,0 +1,163 @@
+body {
+    background: #181824;
+    color: #e0e0e0;
+    font-family: 'Montserrat', 'Poppins', 'Quicksand', Arial, sans-serif;
+    /* text-transform: lowercase; */
+}
+.container {
+    background: #232336;
+    border-radius: 12px;
+    box-shadow: 0 2px 16px 0 #0004;
+}
+h1, h5, label, .form-label, .nav-link, .card-header {
+    color: #43e97b;
+    /* text-transform: lowercase; */
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+h1, h5, .card-header, .nav-link.active {
+    font-weight: 700;
+}
+.card {
+    background: #232336;
+    border: 1px solid #2d2d44;
+}
+.card-header {
+    background: #232336;
+    border-bottom: 1px solid #2d2d44;
+}
+.card-body {
+    background: #232336;
+}
+.form-control, .form-select, textarea {
+    background: #232336;
+    color: #e0e0e0;
+    border: 1px solid #3a3a5a;
+    font-family: 'Montserrat', 'Poppins', 'Quicksand', Arial, sans-serif;
+}
+.form-control:focus, .form-select:focus, textarea:focus {
+    border-color: #a259f7;
+    box-shadow: 0 0 0 0.2rem #a259f766;
+    background: #232336;
+    color: #fff;
+}
+.btn-primary {
+    background: linear-gradient(90deg, #43e97b 0%, #a259f7 100%);
+    border: none;
+    color: #181824;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+.btn-primary:hover, .btn-primary:focus {
+    background: linear-gradient(90deg, #a259f7 0%, #43e97b 100%);
+    color: #fff;
+}
+.nav-tabs {
+    border-bottom: 1px solid #3a3a5a;
+}
+.nav-link {
+    color: #a259f7;
+    background: transparent;
+    border: none;
+    font-weight: 700;
+}
+.nav-link.active, .nav-link:focus, .nav-link:hover {
+    color: #43e97b !important;
+    background: #232336 !important;
+    border-bottom: 3px solid #43e97b !important;
+}
+.tab-content {
+    background: #232336;
+    border-radius: 0 0 12px 12px;
+    border: 1px solid #2d2d44;
+    border-top: none;
+    padding: 20px;
+}
+.output-container {
+    background-color: #181824;
+    color: #d4d4d4;
+    padding: 15px;
+    border-radius: 5px;
+    font-family: monospace;
+    height: 300px;
+    overflow-y: auto;
+    margin-top: 20px;
+    border: 1px solid #3a3a5a;
+}
+.form-label {
+    color: #a259f7;
+    font-weight: 700;
+}
+.form-control::placeholder, textarea::placeholder {
+    color: #8888aa;
+}
+.collapse {
+    background: #232336;
+}
+/* Scrollbar styling */
+::-webkit-scrollbar {
+    width: 8px;
+    background: #232336;
+}
+::-webkit-scrollbar-thumb {
+    background: linear-gradient(90deg, #43e97b 0%, #a259f7 100%);
+    border-radius: 4px;
+}
+/* Misc */
+.mb-3, .mb-2 {
+    margin-bottom: 1rem !important;
+}
+/* Responsive: hide DJ fields row on small screens */
+@media (max-width: 600px) {
+    .dj-fields-row {
+        display: none !important;
+    }
+}
+/* Remove old DJ options toggle button styles */
+#djOptionsToggle, #djOptionsChevron {
+    display: none !important;
+}
+
+/* DJ options card-header chevron style */
+#djOptionsHeader {
+    background: #232336;
+    border-bottom: 1px solid #2d2d44;
+    color: #43e97b;
+    font-weight: 700;
+    font-size: 1.1em;
+    padding: 0.75rem 1.25rem;
+}
+#djOptionsTriangle {
+    transition: transform 0.2s;
+    font-size: 1.2em;
+    color: #a259f7;
+}
+
+/* Responsive: show/hide DJ options collapse on mobile/desktop */
+@media (max-width: 767px) {
+    #djOptionsHeader {
+        display: flex;
+    }
+    #djOptionsCollapse {
+        display: none;
+    }
+    #djOptionsCollapse.show {
+        display: flex !important;
+        flex-wrap: wrap;
+    }
+}
+@media (min-width: 768px) {
+    #djOptionsHeader {
+        display: none !important;
+    }
+    #djOptionsCollapse {
+        display: flex !important;
+        opacity: 1 !important;
+        height: auto !important;
+        flex-wrap: wrap;
+    }
+}
+/* Chevron rotation for open state */
+#djOptionsToggle.open #djOptionsChevron {
+    transform: rotate(90deg);
+} 
