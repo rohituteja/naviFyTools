@@ -29,6 +29,7 @@ from openai import OpenAI
 import argparse
 from typing import List, Dict  # optional, only for type hints
 import configparser
+from rapidfuzz import fuzz
 
 # --------------------------------------------------
 # CONFIG & LLM CLIENT SETUP
@@ -194,11 +195,12 @@ def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[
         "role": "system",
         "content": (
             f"You are a music‑curation assistant. Given a vibe prompt and a list of {label}, "
-            f"return exactly {n} {label} from the list that best fit the vibe, as a JSON array of strings."
-            f"Print the objects EXACTLY as listed in the input you are given."
+            f"return exactly {n} {label} from the list that best fit the vibe, as a JSON array of strings.\n"
+            f"You MUST ONLY select from the provided list. Do NOT invent or return any item not in the list.\n"
             f"If the prompt specifically mentions anything/anyone in the list, be SURE to include it, "
             f"but do not include ANY items that are not in the list. If it makes sense to terminate the "
             f"list before hitting {n} objects, do so.\n"
+            f"If nothing matches, return an empty list.\n"
             f"Consider the whole list first and the vibe and then make your decisions.\n"
             f"Return **only** a JSON array of strings. No objects, keys, or comments."
         ),
@@ -210,12 +212,16 @@ def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[
             f"Respond with **ONLY** a JSON array of {n} strings (no extra keys, no prose)."
         ),
     }
-
     raw = _strip_fences(_llm_chat([system_msg, user_msg]))
     try:
         arr = json.loads(raw)
         if isinstance(arr, list):
-            return arr[:n]
+            # Only return items that are actually in the provided list
+            valid = [x for x in arr if x in items]
+            dropped = [x for x in arr if x not in items]
+            if dropped:
+                print(f"[WARN] LLM returned {len(dropped)} invalid {label}: {dropped}")
+            return valid[:n]
     except Exception:
         pass
     return items[:n]
@@ -235,7 +241,7 @@ def generate_playlist(
     *,
     chunk_size: int,
     required_ratio: float,
-    existing_playlists: list[dict] = None,
+    existing_playlists: list[dict] = [],
 ) -> list[dict]:
     """Returns JSON-only; caller can safely json.loads() the result."""
     playlist = []
@@ -479,20 +485,20 @@ def ensure_min_songs(playlist: list[dict], candidates: list[dict], min_songs: in
     remaining = [s for s in candidates if s["id"] not in {p["id"] for p in playlist}]
     random.shuffle(remaining)
     playlist.extend({"id": s["id"], "title": s["title"]} for s in remaining[:needed])
-    print(f"🔄 Added {len(remaining[:needed])} random songs from filtered options to reach minimum length of {min_songs}.")
+    print(f"Added {len(remaining[:needed])} random songs from filtered options to reach minimum length of {min_songs}.")
     return playlist[:max_songs]
 
 # --------------------------------------------------
 # PLAYLIST ENTRY SANITISER
 # --------------------------------------------------
 
-def _sanitize_playlist(entries: List[dict], candidates: List[dict]) -> List[dict]:
+def _sanitize_playlist(entries: List[dict], candidates: List[dict], fuzzy_threshold: int = 90) -> List[dict]:
     """
     Ensure each playlist entry has an 'id'. If an entry only has a 'title'
     (and optionally 'artist'), try to resolve the matching song in *candidates*
-    via a case-insensitive title-and-artist match.  Drop any rows we can’t
-    resolve.  This is backend-agnostic and therefore safe for both Ollama and
-    OpenAI modes.
+    via a case-insensitive title-and-artist match. If that fails, use fuzzy matching
+    on title and artist. Drop any rows we can’t resolve. This is backend-agnostic and
+    therefore safe for both Ollama and OpenAI modes.
     """
     id_by_pair = {
         (s["title"].lower(), (s.get("artist") or "").lower()): s["id"]
@@ -503,14 +509,101 @@ def _sanitize_playlist(entries: List[dict], candidates: List[dict]) -> List[dict
     for e in entries:
         if not isinstance(e, dict):
             continue
-        if "id" in e:
+        if "id" in e and any(s["id"] == e["id"] for s in candidates):
             cleaned.append(e)
             continue
         key = (e.get("title", "").lower(), e.get("artist", "").lower())
         resolved = id_by_pair.get(key)
         if resolved:
             cleaned.append({"id": resolved, "title": e.get("title")})
+            continue
+        # Fuzzy match fallback using rapidfuzz
+        best_score = 0
+        best_id = None
+        for s in candidates:
+            title_score = fuzz.ratio((e.get("title") or "").lower(), (s.get("title") or "").lower())
+            artist_score = fuzz.ratio((e.get("artist") or "").lower(), (s.get("artist") or "").lower())
+            avg_score = (title_score + artist_score) // 2
+            if avg_score > best_score and avg_score >= fuzzy_threshold:
+                best_score = avg_score
+                best_id = s["id"]
+        if best_id:
+            cleaned.append({"id": best_id, "title": e.get("title")})
     return cleaned
+
+# --------------------------------------------------
+# PROMPT ENTITY EXTRACTION
+# --------------------------------------------------
+
+STOPWORDS = {'and', 'but', 'mix', 'the', 'a', 'an', 'of', 'in', 'on', 'for', 'to', 'from', 'by', 'with', 'at', 'as', 'is', 'it', 'or', 'vs', 'feat', 'featuring'}
+
+def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: list[str]) -> dict:
+    """
+    Extract artists and genres mentioned in the prompt.
+    Returns a dict with keys: 'artists', 'genres'.
+    """
+    entities = {'artists': [], 'genres': []}
+    prompt_lc = prompt.lower()
+    # Artists
+    for artist in all_artists:
+        if artist.lower() in prompt_lc:
+            entities['artists'].append(artist)
+    # Genres
+    for genre in all_genres:
+        if genre.lower() in prompt_lc:
+            entities['genres'].append(genre)
+    return entities
+
+# New function to select relevant albums using LLM
+
+def select_relevant_albums_llm(prompt: str, all_albums: list[str], n: int = 5) -> list[str]:
+    system_msg = {
+        "role": "system",
+        "content": (
+            f"You are a music curation assistant. Given a vibe prompt and a list of album names, "
+            f"return up to {n} album names from the list that are most relevant to the prompt, as a JSON array of strings.\n"
+            f"You MUST ONLY select from the provided list. Do NOT invent or return any item not in the list.\n"
+            f"If the prompt specifically mentions anything in the list, be SURE to include it.\n"
+            f"If nothing matches or seems relevant, return an empty list.\n"
+            f"Return **only** a JSON array of strings. No objects, keys, or comments.\n"
+            f"Do NOT return a mapping, dictionary, or object. Only a flat JSON array of album names."
+        ),
+    }
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"Vibe prompt: \"{prompt}\"\n\nAvailable albums ({len(all_albums)}): {all_albums}\n\n"
+            f"Respond with **ONLY** a JSON array of up to {n} strings (no extra keys, no prose)."
+        ),
+    }
+    raw = _strip_fences(_llm_chat([system_msg, user_msg]))
+    try:
+        arr = json.loads(raw)
+        # Fallback: if dict, flatten keys and values into a list
+        if isinstance(arr, dict):
+            # If the dict has a single key and its value is a list, use that list
+            if len(arr) == 1 and isinstance(next(iter(arr.values())), list):
+                arr = next(iter(arr.values()))
+            else:
+                arr = list(arr.keys()) + list(arr.values())
+        # If the result is a list of lists, flatten it
+        if isinstance(arr, list):
+            flat = []
+            for x in arr:
+                if isinstance(x, list):
+                    flat.extend(x)
+                else:
+                    flat.append(x)
+            arr = flat
+            valid = [x for x in arr if x in all_albums]
+            dropped = [x for x in arr if x not in all_albums]
+            if dropped:
+                print(f"[WARN] LLM returned {len(dropped)} invalid albums: {dropped}")
+            return valid[:n]
+    except Exception:
+        print(f"[WARN] JSON parse error: {raw}")
+        pass
+    return []
 
 # --------------------------------------------------
 # MAIN (updated flow with context playlist)
@@ -534,72 +627,94 @@ def _main_impl(args):
     # Select context playlist songs
     context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs)
 
-    # Fetch full library artists/genres
+    # Fetch full library artists/genres/albums
     all_artists = fetch_all_artists()
-    random.shuffle(all_artists)  # Shuffle to randomise order
+    random.shuffle(all_artists)
     all_genres = fetch_all_genres()
     random.shuffle(all_genres)
+    all_albums = [a for a in {s.get('album') for s in all_songs if s.get('album')} if isinstance(a, str)]
+    random.shuffle(all_albums)
 
-    ## Extract artists/genres from context playlist (weighted highest)
+    # Extract prompt entities (artists, genres)
+    prompt_entities = extract_prompt_entities(prompt, all_artists, all_genres)
+    explicit_prompt_artists = prompt_entities['artists']
+    explicit_prompt_genres = prompt_entities['genres']
 
-    # Split artist strings on commas/semicolons and strip whitespace
-    artists = []
-    for s in context_songs:
-        if s.get("artist"):
-            # normalize separators to comma (handle semicolons and bullet •)
-            raw = s["artist"].replace(";", ",").replace("•", ",")
-            for a in raw.split(","):
-                name = a.strip()
-                if name:
-                    artists.append(name)
-    context_artists = list(dict.fromkeys(artists))
-    random.shuffle(context_artists)
+    # Use LLM to select up to 5 relevant albums
+    relevant_albums = select_relevant_albums_llm(prompt, all_albums, n=5)
+    album_artists = []
+    album_genres = []
+    if relevant_albums:
+        album_songs = [s for s in all_songs if s.get('album') in relevant_albums]
+        context_song_ids = {s['id'] for s in context_songs} if context_songs else set()
+        new_album_songs = [s for s in album_songs if s['id'] not in context_song_ids]
+        if context_songs:
+            context_songs = context_songs + new_album_songs
+        else:
+            context_songs = new_album_songs
+        # Collect artists and genres from relevant albums
+        for s in album_songs:
+            if s.get('artist'):
+                album_artists.append(s['artist'])
+            if s.get('genre'):
+                album_genres.append(s['genre'])
+        album_artists = list(dict.fromkeys(album_artists))
+        album_genres = list(dict.fromkeys(album_genres))
 
-    # Extract genres from context playlist (splitting multi-genre strings)
-    # Normalize separators and split on commas/semicolons
-    genres = []
-    for s in context_songs:
-        if s.get("genre"):
-            raw = s["genre"].replace(";", ",").replace("•", ",")
-            for g in raw.split(","):
-                name = g.strip()
-                if name:
-                    genres.append(name)
-    context_genres = list(dict.fromkeys(genres))
-    random.shuffle(context_genres)
+    # Extract artists/genres from context playlist (weighted highest)
+    context_artists = []
+    context_genres = []
+    if context_songs:
+        # Split artist strings on commas/semicolons and strip whitespace
+        for s in context_songs:
+            if s.get("artist"):
+                raw = s["artist"].replace(";", ",").replace("•", ",")
+                for a in raw.split(","):
+                    name = a.strip()
+                    if name:
+                        context_artists.append(name)
+        context_artists = list(dict.fromkeys(context_artists))
+        for s in context_songs:
+            if s.get("genre"):
+                raw = s["genre"].replace(";", ",").replace("•", ",")
+                for g in raw.split(","):
+                    name = g.strip()
+                    if name:
+                        context_genres.append(name)
+        context_genres = list(dict.fromkeys(context_genres))
 
+    # Continue as before, but use album_filtered_songs for focus selection
     num_artists: int = 30
     num_genres:  int = 50
-
-    # Higher artist/genre counts when no context playlist to base off
-    if not context_songs:
-        num_artists = int(num_artists * 1.5)  # 45
-        num_genres  = int(num_genres  * 1.5)  # 75
-        
-
-    # First, collect any artists explicitly mentioned in the prompt
-    explicit_prompt_artists = extract_prompt_artists(prompt, all_artists)
 
     init_focus_artists = select_top_items(prompt, all_artists, num_artists, "artists")
     init_focus_genres  = select_top_items(prompt, all_genres, num_genres, "genres")
 
-    if not context_songs:
-        focus_artists = init_focus_artists
-        focus_genres = init_focus_genres
-    else:
-        focus_artists = select_top_items(prompt, list(set(context_artists + init_focus_artists)), int(num_artists * .8), "artists")
-        focus_genres = select_top_items(prompt, list(set(context_genres + init_focus_genres)), int(num_genres * .8), "genres")
+    # Combine context, prompt, and LLM-selected for focus
+    combined_artists = list(dict.fromkeys(
+        explicit_prompt_artists + album_artists + context_artists + init_focus_artists
+    ))
+    combined_genres = list(dict.fromkeys(
+        explicit_prompt_genres + album_genres + context_genres + init_focus_genres 
+    ))
 
-    # Ensure prompt-named artists lead the list and aren’t dropped by truncation
-    if explicit_prompt_artists:
-        ordered = explicit_prompt_artists + [a for a in focus_artists if a not in explicit_prompt_artists]
-        focus_artists = ordered[: num_artists + len(explicit_prompt_artists)]
+    focus_artists = select_top_items(prompt, combined_artists, num_artists, "artists")
+    focus_genres = select_top_items(prompt, combined_genres, num_genres, "genres")
 
+    # Print focus artists, genres, and albums
     print("Focus artists:", ", ".join(focus_artists))
     print("Focus genres: ", ", ".join(focus_genres))
+    if relevant_albums:
+        print("Focus albums: ", ", ".join(relevant_albums))
 
     # Filter library based on focus
     filtered = [s for s in all_songs if (s["artist"] in focus_artists) and (s.get("genre") in focus_genres)]
+    # Also include all songs from relevant albums, avoiding duplicates
+    if relevant_albums:
+        filtered_ids = {s['id'] for s in filtered}
+        album_songs = [s for s in all_songs if s.get('album') in relevant_albums and s['id'] not in filtered_ids]
+        filtered_ids.update(s['id'] for s in album_songs)
+        filtered.extend(album_songs)
     if not filtered and not context_songs:
         print("No songs match the selected artists/genres – aborting.")
         return
@@ -611,7 +726,7 @@ def _main_impl(args):
     else:
         combined_songs = filtered
 
-    random.shuffle(combined_songs)  # Shuffle to randomise order
+    random.shuffle(combined_songs)
     print(f"Generating playlist ({len(combined_songs)} candidate songs)…")
 
     # We need at least args.min_songs tracks in total → derive a ratio
@@ -627,8 +742,11 @@ def _main_impl(args):
     print(f"Generated {len(playlist_items)} tracks from {len(combined_songs)} candidates.")
     playlist_items = ensure_min_songs(playlist_items, combined_songs, args.min_songs)
 
-    # Resolve any entries missing an 'id' before upload
+    # Resolve any entries missing an 'id' before upload (with fuzzy matching)
     playlist_items = _sanitize_playlist(playlist_items, combined_songs)
+
+    # After sanitization, ensure we still meet the minimum song count
+    playlist_items = ensure_min_songs(playlist_items, combined_songs, args.min_songs)
 
     if not playlist_items:
         print("LLM returned an empty playlist.")
