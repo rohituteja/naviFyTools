@@ -557,53 +557,44 @@ def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: lis
 # New function to select relevant albums using LLM
 
 def select_relevant_albums_llm(prompt: str, all_albums: list[str], n: int = 5) -> list[str]:
+    """
+    Use the LLM to select up to n relevant albums from all_albums for the given prompt.
+    The LLM must return a JSON object: {"albums": [ ... ]} (never a list or dict with other keys).
+    Only albums in all_albums are valid. If the response is not valid, return [].
+    """
     system_msg = {
         "role": "system",
         "content": (
-            f"You are a music curation assistant. Given a vibe prompt and a list of album names, "
-            f"return up to {n} album names from the list that are most relevant to the prompt, as a JSON array of strings.\n"
+            f"You are a music‑curation assistant. Given a vibe prompt and a list of album names, "
+            f"return up to {n} album names from the list that are most relevant to the prompt, as a JSON object.\n"
             f"You MUST ONLY select from the provided list. Do NOT invent or return any item not in the list.\n"
             f"If the prompt specifically mentions anything in the list, be SURE to include it.\n"
             f"If nothing matches or seems relevant, return an empty list.\n"
-            f"Return **only** a JSON array of strings. No objects, keys, or comments.\n"
-            f"Do NOT return a mapping, dictionary, or object. Only a flat JSON array of album names."
+            f"Return **only** a JSON object in this format: {{\"albums\": [ ... ]}}. No other keys, no comments, no prose.\n"
+            f"Do NOT return a list, mapping, or dictionary with other keys. Only a JSON object with an 'albums' array."
         ),
     }
     user_msg = {
         "role": "user",
         "content": (
             f"Vibe prompt: \"{prompt}\"\n\nAvailable albums ({len(all_albums)}): {all_albums}\n\n"
-            f"Respond with **ONLY** a JSON array of up to {n} strings (no extra keys, no prose)."
+            f"Respond with **ONLY** a JSON object: {{\"albums\": [ ... ]}} (no extra keys, no prose)."
         ),
     }
     raw = _strip_fences(_llm_chat([system_msg, user_msg]))
     try:
-        arr = json.loads(raw)
-        # Fallback: if dict, flatten keys and values into a list
-        if isinstance(arr, dict):
-            # If the dict has a single key and its value is a list, use that list
-            if len(arr) == 1 and isinstance(next(iter(arr.values())), list):
-                arr = next(iter(arr.values()))
-            else:
-                arr = list(arr.keys()) + list(arr.values())
-        # If the result is a list of lists, flatten it
-        if isinstance(arr, list):
-            flat = []
-            for x in arr:
-                if isinstance(x, list):
-                    flat.extend(x)
-                else:
-                    flat.append(x)
-            arr = flat
-            valid = [x for x in arr if x in all_albums]
-            dropped = [x for x in arr if x not in all_albums]
-            if dropped:
-                print(f"[WARN] LLM returned {len(dropped)} invalid albums: {dropped}")
-            return valid[:n]
+        parsed = json.loads(raw)
+        if not (isinstance(parsed, dict) and "albums" in parsed and isinstance(parsed["albums"], list)):
+            print(f"[WARN] LLM did not return a valid albums object: {raw}")
+            return []
+        valid = [x for x in parsed["albums"] if x in all_albums]
+        dropped = [x for x in parsed["albums"] if x not in all_albums]
+        if dropped:
+            print(f"[WARN] LLM returned {len(dropped)} invalid albums: {dropped}")
+        return valid[:n]
     except Exception:
         print(f"[WARN] JSON parse error: {raw}")
-        pass
-    return []
+        return []
 
 # --------------------------------------------------
 # MAIN (updated flow with context playlist)
@@ -621,8 +612,9 @@ def _main_impl(args):
     if not all_songs:
         print("No songs found on the server.")
         return
+    print("\n")
 
-    print("\nChoosing context...")
+    print("Choosing context...")
     existing_playlists = fetch_all_playlists()
     # Select context playlist songs
     context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs)
@@ -635,11 +627,13 @@ def _main_impl(args):
     all_albums = [a for a in {s.get('album') for s in all_songs if s.get('album')} if isinstance(a, str)]
     random.shuffle(all_albums)
 
+    print("Analyzing request...")
     # Extract prompt entities (artists, genres)
     prompt_entities = extract_prompt_entities(prompt, all_artists, all_genres)
     explicit_prompt_artists = prompt_entities['artists']
     explicit_prompt_genres = prompt_entities['genres']
 
+    print("Connsidering albums...")
     # Use LLM to select up to 5 relevant albums
     relevant_albums = select_relevant_albums_llm(prompt, all_albums, n=5)
     album_artists = []
@@ -660,6 +654,7 @@ def _main_impl(args):
                 album_genres.append(s['genre'])
         album_artists = list(dict.fromkeys(album_artists))
         album_genres = list(dict.fromkeys(album_genres))
+        print("Focus albums: ", ", ".join(relevant_albums))
 
     # Extract artists/genres from context playlist (weighted highest)
     context_artists = []
@@ -687,6 +682,7 @@ def _main_impl(args):
     num_artists: int = 30
     num_genres:  int = 50
 
+    print("Choosing top artists and genres...")
     init_focus_artists = select_top_items(prompt, all_artists, num_artists, "artists")
     init_focus_genres  = select_top_items(prompt, all_genres, num_genres, "genres")
 
@@ -699,15 +695,13 @@ def _main_impl(args):
     ))
 
     focus_artists = select_top_items(prompt, combined_artists, num_artists, "artists")
-    focus_genres = select_top_items(prompt, combined_genres, num_genres, "genres")
-
-    # Print focus artists, genres, and albums
     print("Focus artists:", ", ".join(focus_artists))
+    
+    focus_genres = select_top_items(prompt, combined_genres, num_genres, "genres")
     print("Focus genres: ", ", ".join(focus_genres))
-    if relevant_albums:
-        print("Focus albums: ", ", ".join(relevant_albums))
 
     # Filter library based on focus
+    print("\nFiltering library...")
     filtered = [s for s in all_songs if (s["artist"] in focus_artists) and (s.get("genre") in focus_genres)]
     # Also include all songs from relevant albums, avoiding duplicates
     if relevant_albums:
