@@ -7,6 +7,7 @@ A set of utilities for syncing playlists between Subsonic/Navidrome and Spotify 
 - **naviDJ.py**: AI-powered playlist generator for Subsonic/Navidrome using OpenAI or Ollama LLMs.
 - **portLibrary.py**: Syncs starred/liked songs and playlists between Spotify and Subsonic/Navidrome (both directions).
 - **portGenres.py**: Updates local music file genres using MusicBrainz tags. The DJ script uses genres to filter songs by, and more detailed genres, such as those from MusicBrainz, helps it filter more effectively, but by no means am I asking you to overwrite all your genres on your files to use these scripts. I'd be interested to see how the DJ performs with different types of metadata and how people tag their genres.
+- **Web App**: Modern web interface for easy access to all tools with real-time output and configuration management.
 
 ## Web App (Flask UI)
 
@@ -77,9 +78,45 @@ An example file for you to use and rename has also been provided.
 
 - **Get your API keys:**
   - [OpenAI API key](https://platform.openai.com/account/api-keys)
-  - [Spotify Developer credentials](https://developer.spotify.com/dashboard/applications)
+  - [Spotify Developer credentials](https://developer.spotify.com/dashboard/applications) (see setup guide below)
   - Subsonic/Navidrome: Use your server's credentials
   - Ollama: Set up your local Ollama server and use its URL if you'd like
+
+### Spotify API Setup Guide
+
+To use the Spotify OAuth authentication in the web app, you need to create a Spotify application:
+
+1. **Create a Spotify App:**
+   - Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+   - Click "Create App"
+   - Fill in the required information:
+     - **App name**: `naviFy Tools` (or any name you prefer)
+     - **App description**: `Music library sync and AI DJ tools`
+     - **Redirect URI**: `http://localhost:5000/` (for local development)
+     - **Website**: Can be left blank or set to your domain
+   - Click "Save"
+
+2. **Get Your Credentials:**
+   - After creating the app, you'll see your **Client ID** and **Client Secret**
+   - Copy these values to your `secrets.txt` file
+
+3. **Configure Redirect URIs:**
+   - In your Spotify app settings, add the redirect URI that matches your setup:
+     - **Local development**: `http://localhost:5000/`
+     - **Custom domain**: `https://yourdomain.com/` (if hosting publicly)
+     - **Custom port**: `http://localhost:8080/` (if using a different port)
+   - **Important**: The redirect URI in your Spotify app settings must exactly match the `REDIRECT_URI` in your `secrets.txt` file
+
+4. **Update Your Configuration:**
+   - In your `secrets.txt`, set:
+     ```
+     [spotify]
+     CLIENT_ID = your-client-id-here
+     CLIENT_SECRET = your-client-secret-here
+     REDIRECT_URI = http://localhost:5000/
+     ```
+
+**Note:** If you change the port or domain where you host the Flask app, remember to update both your Spotify app settings and the `REDIRECT_URI` in your `secrets.txt` file.
 
 The playlist sync script does attempt to sync over playlist images, however Navidrome doesn't do anything with images that are sent with a playlist. Despite this, the DJ script still uses a DJ.png file try and set a default image for the playlists, which is included for you if you'd like to use or replace it. 
 
@@ -87,35 +124,73 @@ The playlist sync script does attempt to sync over playlist images, however Navi
 
 ## Usage
 
-### naviDJ.py
+### Web App (Recommended)
+The easiest way to use naviFy Tools is through the web interface:
+
+1. **Start the web app:**
+   ```bash
+   python app.py
+   ```
+
+2. **Open your browser** to [http://localhost:5000](http://localhost:5000)
+
+3. **Configure your settings** in the Configuration section
+
+4. **Use the tools:**
+   - **naviDJ Tab**: Generate AI playlists with custom prompts
+   - **Library Porter Tab**: Sync playlists between Spotify and your music server
+   - **Spotify Authentication**: Login with Spotify directly in the browser
+
+### Command Line Usage
+
+#### naviDJ.py
 Generate a playlist using AI:
 ```
 python naviDJ.py --playlist_name "My Playlist" --prompt "energetic summer road trip" --min_songs 40 --llm_mode openai --llm_model gpt-4o-mini
 ```
-- If arguments are omitted, the script will use it's defaults or prompt for them interactively if need be. The default playlist name is "naviDJ".
+- If arguments are omitted, the script will use its defaults or prompt for them interactively if needed. The default playlist name is "naviDJ".
 - You can set the default LLM backend and model in `secrets.txt` under the `[llm]` section. Command-line arguments override these defaults.
 
-### portLibrary.py
+#### portLibrary.py
 Sync playlists and likes between Spotify and Subsonic:
 ```
 python portLibrary.py --sync-starred y --sync-playlists y --import-liked y --import-playlists y --playlists "Playlist1,Playlist2"
 ```
 - If arguments are omitted, the script will prompt for them interactively.
-- NOTE: By default, this script is designed to ignore syncing playlists named 'naviDJ'. With how this works, when syncing TO Spotify, the script will simply add "missing" songs, so if you use the DJ with a different playlist name, instead of porting the updated version to Spotify and replacing it, it will simply keep appending the songs in the playlist. 
+- **Note**: By default, this script is designed to ignore syncing playlists named 'naviDJ'. When syncing TO Spotify, the script will simply add "missing" songs, so if you use the DJ with a different playlist name, instead of porting the updated version to Spotify and replacing it, it will simply keep appending the songs to the playlist. 
 
-### portGenres.py
+#### portGenres.py
 Update genres for your local music library using MusicBrainz:
 ```
 python portGenres.py /path/to/your/music --dry-run
 ```
 - Omit `--dry-run` to actually write changes.
-- This script is meant to run on your music files and edit the genre tags for them, grabbing the information from MusicBrainz and defaulting to whatever you have in the file already as a fallback. The DJ script was optimized based on the genre variety that is provided by this script, however it should work regardless so don't feel the need to update your metadata unncessarily. The way the DJ script filters songs will be impacted by the diversity of the genres you tagged your music with, feel free to share your experiences with how it works!
+- This script is meant to run on your music files and edit the genre tags for them, grabbing the information from MusicBrainz and defaulting to whatever you have in the file already as a fallback. The DJ script was optimized based on the genre variety that is provided by this script, however it should work regardless so don't feel the need to update your metadata unnecessarily. The way the DJ script filters songs will be impacted by the diversity of the genres you tagged your music with, feel free to share your experiences with how it works!
 
 ---
 
-## Notes
+## Troubleshooting
+
+### Common Issues
+
+**"INVALID_CLIENT: Invalid redirect URI"**
+- Make sure your Spotify app's redirect URI exactly matches the `REDIRECT_URI` in your `secrets.txt`
+- Update both your Spotify app settings and `secrets.txt` if you change ports
+
+**"Spotify credentials not configured"**
+- Ensure your `secrets.txt` has the correct `CLIENT_ID` and `CLIENT_SECRET` values
+- Check that the Spotify section exists in your configuration
+
+**Scripts not working**
+- Verify your `secrets.txt` is properly configured
+- Check that your Subsonic/Navidrome server is accessible
+- Ensure you have the required Python packages installed
+
+### Getting Help
+
 - **Never commit your `secrets.txt` file!** It is gitignored by default.
 - For detailed options, see the top of each script or run with `--help`.
+- Check the real-time output in the web app for detailed error messages.
 
 ---
 
