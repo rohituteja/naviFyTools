@@ -32,8 +32,78 @@
             <div id="configSection" class="collapse">
                 <div class="card-body">
                     <form id="configForm">
+                        <!-- LLM Configuration Section -->
+                        <div class="config-section mb-4">
+                            <h5>LLM Configuration</h5>
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">LLM Mode</label>
+                                    <select class="form-control" id="llmModeSelect" name="llm.mode">
+                                        <option value="openai" {% if config.get('llm', 'mode', fallback='') == 'openai' %}selected{% endif %}>OpenAI</option>
+                                        <option value="ollama" {% if config.get('llm', 'mode', fallback='') == 'ollama' %}selected{% endif %}>Ollama</option>
+                                        <option value="custom" {% if config.get('llm', 'mode', fallback='') == 'custom' %}selected{% endif %}>Custom API</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">LLM Model</label>
+                                    <select class="form-control" id="llmModelSelect" name="llm.model">
+                                        <option value="">Loading models...</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- API Configuration Sections -->
+                        <div id="openaiConfig" class="config-section mb-4" style="display: none;">
+                            <h5>OpenAI Configuration</h5>
+                            <div class="mb-3">
+                                <label class="form-label">OpenAI API Key</label>
+                                <input type="password" class="form-control" 
+                                       name="openai.openai_key"
+                                       value="{{ config.get('openai', 'openai_key', fallback='') }}"
+                                       data-section="openai"
+                                       data-key="openai_key">
+                            </div>
+                        </div>
+
+                        <div id="ollamaConfig" class="config-section mb-4" style="display: none;">
+                            <h5>Ollama Configuration</h5>
+                            <div class="mb-3">
+                                <label class="form-label">Ollama Base URL</label>
+                                <input type="text" class="form-control" 
+                                       name="ollama.ollama_base"
+                                       value="{{ config.get('ollama', 'ollama_base', fallback='') }}"
+                                       data-section="ollama"
+                                       data-key="ollama_base"
+                                       placeholder="http://localhost:11434/v1">
+                            </div>
+                        </div>
+
+                        <div id="customConfig" class="config-section mb-4" style="display: none;">
+                            <h5>Custom API Configuration</h5>
+                            <div class="mb-3">
+                                <label class="form-label">Custom API Base URL</label>
+                                <input type="text" class="form-control" 
+                                       name="custom.base_url"
+                                       value="{{ config.get('custom', 'base_url', fallback='') }}"
+                                       data-section="custom"
+                                       data-key="base_url"
+                                       placeholder="https://your-api-endpoint.com/v1">
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Custom API Key</label>
+                                <input type="password" class="form-control" 
+                                       name="custom.api_key"
+                                       value="{{ config.get('custom', 'api_key', fallback='') }}"
+                                       data-section="custom"
+                                       data-key="api_key">
+                            </div>
+                        </div>
+
+                        <!-- Other Configuration Sections -->
                         {% for section in config.sections() %}
-                        <div class="config-section">
+                        {% if section not in ['llm', 'openai', 'ollama', 'custom'] %}
+                        <div class="config-section mb-4">
                             <h5>{{ section }}</h5>
                             {% for key, value in config[section].items() %}
                             <div class="mb-3">
@@ -46,6 +116,7 @@
                             </div>
                             {% endfor %}
                         </div>
+                        {% endif %}
                         {% endfor %}
                         <button type="submit" class="btn btn-primary">save configuration</button>
                     </form>
@@ -73,24 +144,13 @@
                             <span class="mb-0"><b>dj options</b></span>
                         </div>
                         <div class="row mb-3 dj-fields-row collapse" id="djOptionsCollapse">
-                            <div class="col-md-3 mb-2 mb-md-0">
+                            <div class="col-md-6 mb-2 mb-md-0">
                                 <label class="form-label">playlist name</label>
                                 <input type="text" class="form-control" name="playlist_name" value="naviDJ">
                             </div>
-                            <div class="col-md-2 mb-2 mb-md-0">
+                            <div class="col-md-6 mb-2 mb-md-0">
                                 <label class="form-label">min. songs</label>
                                 <input type="number" class="form-control" name="min_songs" value="35">
-                            </div>
-                            <div class="col-md-3 mb-2 mb-md-0">
-                                <label class="form-label">LLM mode</label>
-                                <select class="form-control" name="llm_mode">
-                                    <option value="openai">OpenAI</option>
-                                    <option value="ollama">Ollama</option>
-                                </select>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label">LLM model (optional)</label>
-                                <input type="text" class="form-control" name="llm_model">
                             </div>
                         </div>
                     </div>

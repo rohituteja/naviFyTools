@@ -39,11 +39,13 @@ from rapidfuzz import fuzz
 secrets = configparser.ConfigParser()
 secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 
-DEFAULT_OPENAI_KEY = secrets.get("openai", "OPENAI_KEY", fallback=None)
-DEFAULT_OLLAMA_BASE = secrets.get("ollama", "OLLAMA_BASE", fallback=None)
+DEFAULT_OPENAI_KEY = secrets.get("openai", "openai_key", fallback=None)
+DEFAULT_OLLAMA_BASE = secrets.get("ollama", "ollama_base", fallback=None)
+DEFAULT_CUSTOM_API_KEY = secrets.get("custom", "api_key", fallback=None)
+DEFAULT_CUSTOM_BASE_URL = secrets.get("custom", "base_url", fallback=None)
 
-DEFAULT_LLM_MODE = secrets.get("llm", "MODE", fallback="openai").lower()
-DEFAULT_LLM_MODEL = secrets.get("llm", "MODEL", fallback=None)
+DEFAULT_LLM_MODE = secrets.get("llm", "mode", fallback="openai").lower()
+DEFAULT_LLM_MODEL = secrets.get("llm", "model", fallback=None)
 
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)
 SUBSONIC_AUTH_PARAMS = {
@@ -68,6 +70,27 @@ def _remove_think_tags(text: str) -> str:
     """Strip <think>...</think> blocks (Ollama 'thinking' traces) and trim whitespace."""
     return _THINK_RE.sub("", text).strip()
 
+def _split_artist_string(artist_string: str) -> list[str]:
+    """
+    Split a complex artist string into individual artist names.
+    Handles various delimiters: ",", "•", ";", "feat.", "featuring", etc.
+    Returns a list of cleaned individual artist names.
+    """
+    if not artist_string:
+        return []
+    
+    # Normalize common delimiters
+    normalized = artist_string.replace("•", ",").replace(";", ",").replace("feat.", ",").replace("featuring", ",")
+    
+    # Split by comma and clean each part
+    artists = []
+    for part in normalized.split(","):
+        artist = part.strip()
+        if artist and artist not in artists:  # Avoid duplicates
+            artists.append(artist)
+    
+    return artists
+
 # --------------------------------------------------
 # LLM CLIENT INITIALISATION
 # --------------------------------------------------
@@ -78,20 +101,23 @@ def configure_llm(mode: str = None, model: str = None) -> None:
 
     # Use secrets.txt defaults if not provided
     mode = (mode or DEFAULT_LLM_MODE or "openai").lower()
-    model = model or DEFAULT_LLM_MODEL
+    model = model or DEFAULT_LLM_MODEL or "gpt-4o-mini"
 
-    if mode not in {"openai", "ollama"}:
-        raise ValueError("Unsupported LLM_MODE. Choose 'openai' or 'ollama'.")
+    if mode not in {"openai", "ollama", "custom"}:
+        raise ValueError("Unsupported LLM_MODE. Choose 'openai', 'ollama', or 'custom'.")
 
     LLM_MODE = mode
 
     if mode == "openai":
         LLM_MODEL = model or "gpt-4o-mini"
         client = OpenAI(api_key=DEFAULT_OPENAI_KEY)
-    else:  # ollama
+    elif mode == "ollama":
         LLM_MODEL = model or "gemma3n:latest"  # e.g. 'llama3' or 'mistral-7b-instruct'
-        # Ollama’s shim at /v1 is OpenAI‑compatible; any string works as the key.
+        # Ollama's shim at /v1 is OpenAI‑compatible; any string works as the key.
         client = OpenAI(api_key="ollama", base_url=DEFAULT_OLLAMA_BASE)
+    else:  # custom
+        LLM_MODEL = model or "gpt-4o-mini"
+        client = OpenAI(api_key=DEFAULT_CUSTOM_API_KEY, base_url=DEFAULT_CUSTOM_BASE_URL)
 
 # --------------------------------------------------
 # SUBSONIC HELPERS
@@ -359,12 +385,17 @@ def fetch_all_artists() -> list[str]:
     )
     r.raise_for_status()
     idx = r.json()["subsonic-response"]["artists"]["index"]
-    return sorted(
-        art["name"]
-        for letter in idx
-        for art in letter.get("artist", [])
-        if art.get("name")
-    )
+    
+    # Collect all artist names and split compound artists
+    all_artists = []
+    for letter in idx:
+        for art in letter.get("artist", []):
+            if art.get("name"):
+                individual_artists = _split_artist_string(art["name"])
+                all_artists.extend(individual_artists)
+    
+    # Remove duplicates and sort
+    return sorted(list(dict.fromkeys(all_artists)))
 
 
 def fetch_all_genres() -> list[str]:
@@ -649,10 +680,11 @@ def _main_impl(args):
         # Collect artists and genres from relevant albums
         for s in album_songs:
             if s.get('artist'):
-                album_artists.append(s['artist'])
+                individual_artists = _split_artist_string(s['artist'])
+                album_artists.extend(individual_artists)
             if s.get('genre'):
                 album_genres.append(s['genre'])
-        album_artists = list(dict.fromkeys(album_artists))
+        album_artists = list(dict.fromkeys(album_artists))  # Remove duplicates
         album_genres = list(dict.fromkeys(album_genres))
         print("Focus albums: ", ", ".join(relevant_albums))
 
@@ -660,15 +692,12 @@ def _main_impl(args):
     context_artists = []
     context_genres = []
     if context_songs:
-        # Split artist strings on commas/semicolons and strip whitespace
+        # Use the helper function to properly split artist strings
         for s in context_songs:
             if s.get("artist"):
-                raw = s["artist"].replace(";", ",").replace("•", ",")
-                for a in raw.split(","):
-                    name = a.strip()
-                    if name:
-                        context_artists.append(name)
-        context_artists = list(dict.fromkeys(context_artists))
+                individual_artists = _split_artist_string(s["artist"])
+                context_artists.extend(individual_artists)
+        context_artists = list(dict.fromkeys(context_artists))  # Remove duplicates
         for s in context_songs:
             if s.get("genre"):
                 raw = s["genre"].replace(";", ",").replace("•", ",")
@@ -702,7 +731,14 @@ def _main_impl(args):
 
     # Filter library based on focus
     print("\nFiltering library...")
-    filtered = [s for s in all_songs if (s["artist"] in focus_artists) and (s.get("genre") in focus_genres)]
+    filtered = []
+    for s in all_songs:
+        # Split the song's artist field and check if any individual artist matches
+        song_artists = _split_artist_string(s.get("artist", ""))
+        artist_match = any(artist in focus_artists for artist in song_artists)
+        genre_match = s.get("genre") in focus_genres
+        if artist_match and genre_match:
+            filtered.append(s)
     # Also include all songs from relevant albums, avoiding duplicates
     if relevant_albums:
         filtered_ids = {s['id'] for s in filtered}

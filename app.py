@@ -7,6 +7,8 @@ from queue import Queue
 import time
 from functools import partial
 import subprocess
+import requests
+from openai import OpenAI
 
 app = Flask(__name__)
 
@@ -36,8 +38,49 @@ def write_secrets(config_data):
             else:
                 secrets[section][key] = current[section][key]
     
+    # Add new sections if they don't exist
+    for section in config_data:
+        if section not in secrets:
+            secrets.add_section(section)
+        for key in config_data[section]:
+            secrets[section][key] = config_data[section][key]
+    
     with open('secrets.txt', 'w') as f:
         secrets.write(f)
+
+def get_available_models(api_type, api_key=None, base_url=None):
+    """Fetch available models from the specified API provider."""
+    try:
+        if api_type == "openai":
+            if not api_key:
+                return {"error": "OpenAI API key required"}
+            client = OpenAI(api_key=api_key)
+            models = client.models.list()
+            return [model.id for model in models.data]
+        elif api_type == "ollama":
+            if not base_url:
+                return {"error": "Ollama base URL required"}
+            # Extract the base URL without the /v1 suffix for Ollama API
+            ollama_base = base_url.replace("/v1", "")
+            response = requests.get(f"{ollama_base}/api/tags")
+            if response.status_code == 200:
+                data = response.json()
+                return [model["name"] for model in data.get("models", [])]
+            else:
+                return {"error": f"Failed to fetch models: {response.status_code}"}
+        elif api_type == "custom":
+            if not base_url or not api_key:
+                return {"error": "Custom API base URL and API key required"}
+            try:
+                client = OpenAI(api_key=api_key, base_url=base_url)
+                models = client.models.list()
+                return [model.id for model in models.data]
+            except Exception as e:
+                return {"error": f"Failed to fetch models from custom API: {str(e)}"}
+        else:
+            return {"error": "Invalid API type"}
+    except Exception as e:
+        return {"error": f"Error fetching models: {str(e)}"}
 
 def script_output_reader(queue, process):
     while True:
@@ -78,10 +121,6 @@ def run_dj():
                 args += ['--prompt', str(data.get('prompt'))]
             if data.get('min_songs'):
                 args += ['--min_songs', str(data.get('min_songs'))]
-            if data.get('llm_mode'):
-                args += ['--llm_mode', str(data.get('llm_mode'))]
-            if data.get('llm_model'):
-                args += ['--llm_model', str(data.get('llm_model'))]
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             while True:
                 output = process.stdout.readline()
@@ -148,6 +187,36 @@ def stream(task_id):
         del output_queues[task_id]
         
     return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/get_models/<api_type>')
+def get_models(api_type):
+    """Get available models for the specified API type."""
+    secrets = read_secrets()
+    
+    if api_type == "openai":
+        api_key = secrets.get("openai", "openai_key", fallback=None)
+        return jsonify(get_available_models("openai", api_key=api_key))
+    elif api_type == "ollama":
+        base_url = secrets.get("ollama", "ollama_base", fallback=None)
+        return jsonify(get_available_models("ollama", base_url=base_url))
+    elif api_type == "custom":
+        api_key = secrets.get("custom", "api_key", fallback=None)
+        base_url = secrets.get("custom", "base_url", fallback=None)
+        return jsonify(get_available_models("custom", api_key=api_key, base_url=base_url))
+    else:
+        return jsonify({"error": "Invalid API type"})
+
+@app.route('/get_config')
+def get_config():
+    """Get current configuration for the frontend."""
+    secrets = read_secrets()
+    config = {}
+    
+    # Convert ConfigParser to dict
+    for section in secrets.sections():
+        config[section] = dict(secrets[section])
+    
+    return jsonify(config)
 
 @app.route('/favicon.ico')
 def favicon():

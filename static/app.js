@@ -27,6 +27,76 @@ document.getElementById('configForm').addEventListener('submit', async (e) => {
     }
 });
 
+// LLM Configuration Management
+let currentLlmMode = 'openai';
+let currentLlmModel = '';
+
+// Function to show/hide API configuration sections
+function toggleApiConfig(mode) {
+    // Hide all config sections
+    document.getElementById('openaiConfig').style.display = 'none';
+    document.getElementById('ollamaConfig').style.display = 'none';
+    document.getElementById('customConfig').style.display = 'none';
+    
+    // Show the selected config section
+    if (mode === 'openai') {
+        document.getElementById('openaiConfig').style.display = 'block';
+    } else if (mode === 'ollama') {
+        document.getElementById('ollamaConfig').style.display = 'block';
+    } else if (mode === 'custom') {
+        document.getElementById('customConfig').style.display = 'block';
+    }
+}
+
+// Function to fetch and populate models
+async function fetchModels(apiType) {
+    const modelSelect = document.getElementById('llmModelSelect');
+    modelSelect.innerHTML = '<option value="">Loading models...</option>';
+    
+    try {
+        const response = await fetch(`/get_models/${apiType}`);
+        const result = await response.json();
+        
+        if (result.error) {
+            modelSelect.innerHTML = `<option value="">Error: ${result.error}</option>`;
+            return;
+        }
+        
+        if (Array.isArray(result)) {
+            modelSelect.innerHTML = '<option value="">Select a model...</option>';
+            result.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = model;
+                if (model === currentLlmModel) {
+                    option.selected = true;
+                }
+                modelSelect.appendChild(option);
+            });
+        } else {
+            modelSelect.innerHTML = '<option value="">No models available</option>';
+        }
+    } catch (error) {
+        modelSelect.innerHTML = '<option value="">Error loading models</option>';
+        console.error('Error fetching models:', error);
+    }
+}
+
+
+// LLM mode change handler for config
+document.getElementById('llmModeSelect')?.addEventListener('change', async function(e) {
+    const mode = e.target.value;
+    currentLlmMode = mode;
+    toggleApiConfig(mode);
+    await fetchModels(mode);
+});
+
+// LLM model change handler for config
+document.getElementById('llmModelSelect')?.addEventListener('change', function(e) {
+    currentLlmModel = e.target.value;
+});
+
+
 // Helper function to handle script execution and output streaming
 function handleScriptExecution(formId, outputId, endpoint) {
     document.getElementById(formId).addEventListener('submit', async (e) => {
