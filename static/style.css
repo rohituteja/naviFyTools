@@ -160,4 +160,53 @@ h1, h5, .card-header, .nav-link.active {
 /* Chevron rotation for open state */
 #djOptionsToggle.open #djOptionsChevron {
     transform: rotate(90deg);
+}
+
+/* Spotify Authentication Styles */
+.btn-success {
+    background: linear-gradient(90deg, #1DB954 0%, #1ed760 100%);
+    border: none;
+    color: #fff;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
+.btn-success:hover, .btn-success:focus {
+    background: linear-gradient(90deg, #1ed760 0%, #1DB954 100%);
+    color: #fff;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(29, 185, 84, 0.3);
+}
+
+.btn-outline-secondary {
+    border: 1px solid #3a3a5a;
+    color: #a259f7;
+    background: transparent;
+}
+
+.btn-outline-secondary:hover {
+    background: #3a3a5a;
+    color: #fff;
+}
+
+#spotifyAuthStatus {
+    padding: 10px;
+    border-radius: 8px;
+    background: rgba(58, 58, 90, 0.3);
+}
+
+.text-success {
+    color: #1DB954 !important;
+}
+
+.text-warning {
+    color: #ffc107 !important;
+}
+
+.text-danger {
+    color: #dc3545 !important;
+}
+
+#spotifyUserInfo {
+    margin-right: 10px;
 } 

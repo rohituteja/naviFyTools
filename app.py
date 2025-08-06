@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, Response, send_from_directory
+from flask import Flask, render_template, request, jsonify, Response, send_from_directory, redirect, url_for, session
 import configparser
 import os
 import sys
@@ -9,8 +9,12 @@ from functools import partial
 import subprocess
 import requests
 from openai import OpenAI
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+import json
 
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # Required for session management
 
 # Import your existing scripts
 import naviDJ
@@ -47,6 +51,58 @@ def write_secrets(config_data):
     
     with open('secrets.txt', 'w') as f:
         secrets.write(f)
+
+def get_spotify_oauth():
+    """Create Spotify OAuth object with current configuration."""
+    secrets = read_secrets()
+    if not secrets.has_section("spotify"):
+        return None
+        
+    client_id = secrets.get("spotify", "client_id", fallback=None)
+    client_secret = secrets.get("spotify", "client_secret", fallback=None)
+    redirect_uri = secrets.get("spotify", "redirect_uri", fallback="http://localhost:5000/callback")
+    scope = secrets.get("spotify", "scope", fallback="user-read-private user-read-playback-state user-library-read user-library-modify playlist-modify-public playlist-modify-private")
+    cache_path = secrets.get("spotify", "cache_path", fallback=".cache-spotify")
+    
+    if not client_id or not client_secret:
+        return None
+    
+    return SpotifyOAuth(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        cache_path=cache_path,
+        show_dialog=False
+    )
+
+def check_spotify_auth():
+    """Check if user is authenticated with Spotify."""
+    sp_oauth = get_spotify_oauth()
+    if not sp_oauth:
+        return {"authenticated": False, "error": "Spotify credentials not configured"}
+    
+    try:
+        token_info = sp_oauth.get_cached_token()
+        if token_info and sp_oauth.is_token_expired(token_info):
+            token_info = sp_oauth.refresh_access_token(token_info["refresh_token"])
+        
+        if token_info:
+            # Test the token by making a simple API call
+            sp = spotipy.Spotify(auth=token_info["access_token"])
+            user = sp.current_user()
+            if user:
+                return {
+                    "authenticated": True, 
+                    "user": user.get("display_name", "Unknown"),
+                    "email": user.get("email", "")
+                }
+            else:
+                return {"authenticated": False, "error": "Failed to get user info"}
+        else:
+            return {"authenticated": False, "error": "No cached token found"}
+    except Exception as e:
+        return {"authenticated": False, "error": str(e)}
 
 def get_available_models(api_type, api_key=None, base_url=None):
     """Fetch available models from the specified API provider."""
@@ -93,6 +149,10 @@ def script_output_reader(queue, process):
 
 @app.route('/')
 def index():
+    # Handle Spotify OAuth callback if code is present
+    if request.args.get('code'):
+        return spotify_callback()
+    
     secrets = read_secrets()
     return render_template('index.html', config=secrets)
 
@@ -107,7 +167,7 @@ def update_config():
 
 @app.route('/run_dj', methods=['POST'])
 def run_dj():
-    data = request.json
+    data = request.json or {}
     queue = Queue()
     task_id = f"dj_{time.time()}"
     output_queues[task_id] = queue
@@ -122,12 +182,13 @@ def run_dj():
             if data.get('min_songs'):
                 args += ['--min_songs', str(data.get('min_songs'))]
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            while True:
-                output = process.stdout.readline()
-                if output == '' and process.poll() is not None:
-                    break
-                if output:
-                    queue.put(output.strip())
+            if process.stdout:
+                while True:
+                    output = process.stdout.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    if output:
+                        queue.put(output.strip())
         finally:
             queue.put(None)  # Signal completion
 
@@ -136,7 +197,7 @@ def run_dj():
 
 @app.route('/run_library', methods=['POST'])
 def run_library():
-    data = request.json
+    data = request.json or {}
     queue = Queue()
     task_id = f"lib_{time.time()}"
     output_queues[task_id] = queue
@@ -156,12 +217,13 @@ def run_library():
                 args += ['--playlists', str(data.get('playlists'))]
 
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            while True:
-                output = process.stdout.readline()
-                if output == '' and process.poll() is not None:
-                    break
-                if output:
-                    queue.put(output.strip())
+            if process.stdout:
+                while True:
+                    output = process.stdout.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    if output:
+                        queue.put(output.strip())
         except Exception as e:
             queue.put(f"Error: {str(e)}")
         finally:
@@ -205,6 +267,57 @@ def get_models(api_type):
         return jsonify(get_available_models("custom", api_key=api_key, base_url=base_url))
     else:
         return jsonify({"error": "Invalid API type"})
+
+@app.route('/spotify/login')
+def spotify_login():
+    """Initiate Spotify OAuth login."""
+    sp_oauth = get_spotify_oauth()
+    if not sp_oauth:
+        return jsonify({"error": "Spotify credentials not configured"}), 400
+    
+    auth_url = sp_oauth.get_authorize_url()
+    return jsonify({"auth_url": auth_url})
+
+@app.route('/spotify/callback')
+def spotify_callback():
+    """Handle Spotify OAuth callback."""
+    sp_oauth = get_spotify_oauth()
+    if not sp_oauth:
+        return jsonify({"error": "Spotify credentials not configured"}), 400
+    
+    try:
+        code = request.args.get('code')
+        if not code:
+            return jsonify({"error": "No authorization code received"}), 400
+        
+        token_info = sp_oauth.get_access_token(code)
+        if token_info:
+            return redirect('/?spotify_auth=success')
+        else:
+            return redirect('/?spotify_auth=error')
+    except Exception as e:
+        return redirect('/?spotify_auth=error')
+
+@app.route('/spotify/logout', methods=['GET', 'POST'])
+def spotify_logout():
+    """Logout from Spotify by clearing cached token."""
+    sp_oauth = get_spotify_oauth()
+    if sp_oauth:
+        try:
+            # Clear the cache file - use the cache_path from secrets
+            secrets = read_secrets()
+            cache_path = secrets.get("spotify", "cache_path", fallback=".cache-spotify")
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+        except Exception as e:
+            pass  # Ignore errors when clearing cache
+    
+    return jsonify({"status": "success"})
+
+@app.route('/spotify/auth_status')
+def spotify_auth_status():
+    """Check Spotify authentication status."""
+    return jsonify(check_spotify_auth())
 
 @app.route('/get_config')
 def get_config():

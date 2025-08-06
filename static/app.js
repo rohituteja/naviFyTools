@@ -107,6 +107,16 @@ function handleScriptExecution(formId, outputId, endpoint) {
         // Show output only when script is run
         outputDiv.classList.remove('d-none');
         
+        // Check Spotify authentication for library porter
+        if (formId === 'libraryForm') {
+            if (!spotifyAuthStatus || !spotifyAuthStatus.authenticated) {
+                const shouldContinue = confirm('You are not authenticated with Spotify. The library porter may not work correctly. Do you want to continue anyway?');
+                if (!shouldContinue) {
+                    return;
+                }
+            }
+        }
+        
         const formData = new FormData(form);
         const data = {};
         for (let [key, value] of formData.entries()) {
@@ -223,6 +233,144 @@ if (djOptionsCollapse && djOptionsTriangle && djOptionsHeader) {
         bsCollapse.hide();
     }
 } 
+
+// Spotify Authentication Management
+let spotifyAuthStatus = null;
+
+// Function to check Spotify authentication status
+async function checkSpotifyAuth() {
+    const authStatus = document.getElementById('spotifyAuthStatus');
+    const authText = document.getElementById('spotifyAuthText');
+    const authSpinner = document.getElementById('spotifyAuthSpinner');
+    const loginBtn = document.getElementById('spotifyLoginBtn');
+    const logoutBtn = document.getElementById('spotifyLogoutBtn');
+    const userInfo = document.getElementById('spotifyUserInfo');
+    const userName = document.getElementById('spotifyUserName');
+
+    // Show spinner
+    authSpinner.classList.remove('d-none');
+    authText.textContent = 'checking authentication...';
+
+    try {
+        const response = await fetch('/spotify/auth_status');
+        const result = await response.json();
+        spotifyAuthStatus = result;
+
+        if (result.authenticated) {
+            authText.textContent = 'authenticated with spotify';
+            authText.className = 'text-success';
+            loginBtn.classList.add('d-none');
+            logoutBtn.classList.remove('d-none');
+            userInfo.classList.remove('d-none');
+            userName.textContent = result.user || 'Unknown User';
+        } else {
+            authText.textContent = result.error || 'not authenticated';
+            authText.className = 'text-warning';
+            loginBtn.classList.remove('d-none');
+            logoutBtn.classList.add('d-none');
+            userInfo.classList.add('d-none');
+        }
+    } catch (error) {
+        authText.textContent = 'error checking authentication';
+        authText.className = 'text-danger';
+        loginBtn.classList.remove('d-none');
+        logoutBtn.classList.add('d-none');
+        userInfo.classList.add('d-none');
+    } finally {
+        authSpinner.classList.add('d-none');
+    }
+}
+
+// Spotify login handler
+document.getElementById('spotifyLoginBtn')?.addEventListener('click', async function() {
+    const loginBtn = document.getElementById('spotifyLoginBtn');
+    const originalText = loginBtn.innerHTML;
+    
+    loginBtn.disabled = true;
+    loginBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>connecting...';
+    
+    try {
+        const response = await fetch('/spotify/login');
+        const result = await response.json();
+        
+        if (result.auth_url) {
+            // Redirect to Spotify authorization in the same window
+            window.location.href = result.auth_url;
+        } else {
+            alert('Error: ' + (result.error || 'Failed to get authorization URL'));
+            loginBtn.disabled = false;
+            loginBtn.innerHTML = originalText;
+        }
+    } catch (error) {
+        alert('Error connecting to Spotify: ' + error);
+        loginBtn.disabled = false;
+        loginBtn.innerHTML = originalText;
+    }
+});
+
+// Spotify logout handler
+document.getElementById('spotifyLogoutBtn')?.addEventListener('click', async function() {
+    const logoutBtn = document.getElementById('spotifyLogoutBtn');
+    const originalText = logoutBtn.innerHTML;
+    
+    logoutBtn.disabled = true;
+    logoutBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>logging out...';
+    
+    try {
+        const response = await fetch('/spotify/logout', { method: 'POST' });
+        const result = await response.json();
+        
+        if (result.status === 'success') {
+            await checkSpotifyAuth();
+        } else {
+            alert('Error logging out: ' + (result.error || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Error logging out: ' + error);
+    } finally {
+        logoutBtn.disabled = false;
+        logoutBtn.innerHTML = originalText;
+    }
+});
+
+// Check Spotify auth status when library tab is shown
+document.querySelector('a[href="#libraryTab"]')?.addEventListener('click', function() {
+    // Small delay to ensure tab is visible
+    setTimeout(checkSpotifyAuth, 100);
+});
+
+// Check auth status on page load if we're on the library tab
+document.addEventListener('DOMContentLoaded', function() {
+    // Check for auth success/error messages in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const spotifyAuth = urlParams.get('spotify_auth');
+    if (spotifyAuth === 'success') {
+        // Switch to library tab if not already there
+        const libraryTabLink = document.querySelector('a[href="#libraryTab"]');
+        const libraryTab = document.getElementById('libraryTab');
+        if (libraryTabLink && libraryTab) {
+            // Activate the library tab
+            const tab = new bootstrap.Tab(libraryTabLink);
+            tab.show();
+        }
+        
+        setTimeout(checkSpotifyAuth, 500);
+        // Clear the URL parameter
+        const newUrl = window.location.pathname;
+        window.history.replaceState({}, document.title, newUrl);
+    } else if (spotifyAuth === 'error') {
+        alert('Spotify authentication failed. Please try again.');
+        // Clear the URL parameter
+        const newUrl = window.location.pathname;
+        window.history.replaceState({}, document.title, newUrl);
+    }
+    
+    // Check auth status if we're on the library tab
+    const libraryTab = document.getElementById('libraryTab');
+    if (libraryTab && libraryTab.classList.contains('show')) {
+        checkSpotifyAuth();
+    }
+});
 
 if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
   window.addEventListener('load', function() {
