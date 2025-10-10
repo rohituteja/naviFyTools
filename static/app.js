@@ -73,6 +73,19 @@ async function fetchModels(apiType) {
                 }
                 modelSelect.appendChild(option);
             });
+            
+            // If we have a current model but it wasn't found in the list, 
+            // try to set it anyway (in case of slight naming differences)
+            if (currentLlmModel && !modelSelect.value) {
+                const existingOption = Array.from(modelSelect.options).find(opt => 
+                    opt.value.toLowerCase().includes(currentLlmModel.toLowerCase()) ||
+                    currentLlmModel.toLowerCase().includes(opt.value.toLowerCase())
+                );
+                if (existingOption) {
+                    existingOption.selected = true;
+                    currentLlmModel = existingOption.value;
+                }
+            }
         } else {
             modelSelect.innerHTML = '<option value="">No models available</option>';
         }
@@ -341,6 +354,38 @@ document.querySelector('a[href="#libraryTab"]')?.addEventListener('click', funct
 
 // Check auth status on page load if we're on the library tab
 document.addEventListener('DOMContentLoaded', function() {
+    // Initialize LLM configuration on page load
+    async function initializeLlmConfig() {
+        const llmModeSelect = document.getElementById('llmModeSelect');
+        if (llmModeSelect) {
+            // Get the initially selected mode from the dropdown
+            currentLlmMode = llmModeSelect.value;
+            
+            // Show the correct API configuration section
+            toggleApiConfig(currentLlmMode);
+            
+            // Fetch current config to get the selected model
+            try {
+                const response = await fetch('/get_config');
+                const config = await response.json();
+                
+                if (config.llm && config.llm.model) {
+                    currentLlmModel = config.llm.model;
+                }
+                
+                // Fetch and populate models for the current mode
+                await fetchModels(currentLlmMode);
+            } catch (error) {
+                console.error('Error initializing LLM config:', error);
+                // Still try to fetch models even if config fetch fails
+                await fetchModels(currentLlmMode);
+            }
+        }
+    }
+    
+    // Initialize LLM configuration
+    initializeLlmConfig();
+    
     // Check for auth success/error messages in URL
     const urlParams = new URLSearchParams(window.location.search);
     const spotifyAuth = urlParams.get('spotify_auth');
