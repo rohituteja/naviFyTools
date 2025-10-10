@@ -409,8 +409,8 @@ def fetch_all_genres() -> list[str]:
     genres = r.json()["subsonic-response"]["genres"]["genre"]
     return sorted(g["value"] for g in genres if g.get("value"))
 
-def fetch_all_playlists() -> list[dict]:
-    """Return all playlists from the server with their details."""
+def fetch_all_playlists(exclude_name: str = None) -> list[dict]:
+    """Return all playlists from the server with their details, excluding specified playlists."""
     r = requests.get(
         f"{SUBSONIC_BASE_URL}/getPlaylists",
         params={**SUBSONIC_AUTH_PARAMS, "f": "json"},
@@ -421,6 +421,15 @@ def fetch_all_playlists() -> list[dict]:
     all_playlists: list[dict] = []
     for pl in playlists:
         pl_id, pl_name = pl["id"], pl["name"]
+        
+        # Skip Daily Mix playlists (case-insensitive)
+        if pl_name.lower().startswith("daily mix"):
+            continue
+            
+        # Skip the target playlist to prevent circular references
+        if exclude_name and pl_name.lower() == exclude_name.lower():
+            continue
+            
         pl_songs = fetch_playlist_songs(pl_id)
         all_playlists.append({"id": pl_id, "name": pl_name, "songs": pl_songs})
     return all_playlists
@@ -646,7 +655,7 @@ def _main_impl(args):
     print("\n")
 
     print("Choosing context...")
-    existing_playlists = fetch_all_playlists()
+    existing_playlists = fetch_all_playlists(exclude_name=playlist_name)
     # Select context playlist songs
     context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs)
 
@@ -762,7 +771,11 @@ def _main_impl(args):
     # We need at least args.min_songs tracks in total → derive a ratio
     required_ratio = args.min_songs / max(1, len(combined_songs))
 
-    chunk_size = 30 if LLM_MODE == "ollama" else 500
+    # Use 500 chunk size for Ollama cloud models, 150 for regular Ollama, 500 for others
+    if LLM_MODE == "ollama":
+        chunk_size = 500 if LLM_MODEL.endswith("-cloud") else 150
+    else:
+        chunk_size = 500
     playlist_items = generate_playlist(
         prompt,
         combined_songs,
