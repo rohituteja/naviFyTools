@@ -180,7 +180,7 @@ def search_subsonic_song(song_title, artist_names):
                 best_score = title_score
                 best_match = song
 
-    return best_match.get('id') if best_match else None
+    return best_match.get('id') if best_match is not None else None
 
 
 def get_subsonic_playlist_id(playlist_name):
