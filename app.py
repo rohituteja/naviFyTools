@@ -61,7 +61,7 @@ def get_spotify_oauth():
     client_id = secrets.get("spotify", "client_id", fallback=None)
     client_secret = secrets.get("spotify", "client_secret", fallback=None)
     redirect_uri = secrets.get("spotify", "redirect_uri", fallback="http://localhost:5000/callback")
-    scope = secrets.get("spotify", "scope", fallback="user-read-private user-read-playback-state user-library-read user-library-modify playlist-modify-public playlist-modify-private")
+    scope = secrets.get("spotify", "scope", fallback="user-read-private user-read-playback-state user-library-read user-library-modify playlist-modify-public playlist-modify-private playlist-read-private")
     cache_path = secrets.get("spotify", "cache_path", fallback=".cache-spotify")
     
     if not client_id or not client_secret:
@@ -318,6 +318,48 @@ def spotify_logout():
 def spotify_auth_status():
     """Check Spotify authentication status."""
     return jsonify(check_spotify_auth())
+
+@app.route('/spotify/playlists')
+def spotify_playlists():
+    """Return user's owned Spotify playlists (name/id/track count)."""
+    sp_oauth = get_spotify_oauth()
+    if not sp_oauth:
+        return jsonify({"error": "Spotify credentials not configured"}), 400
+    try:
+        token_info = sp_oauth.get_cached_token()
+        if token_info and sp_oauth.is_token_expired(token_info):
+            token_info = sp_oauth.refresh_access_token(token_info["refresh_token"])
+        if not token_info:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        sp = spotipy.Spotify(auth=token_info["access_token"])
+        me = sp.current_user()
+        if not me:
+            return jsonify({"error": "Failed to fetch user"}), 500
+
+        user_id = me.get("id")
+        playlists = []
+        limit = 50
+        offset = 0
+        while True:
+            resp = sp.current_user_playlists(limit=limit, offset=offset)
+            items = resp.get('items', [])
+            # filter to only owned by the current user
+            for pl in items:
+                owner = (pl.get('owner') or {}).get('id')
+                if owner == user_id:
+                    playlists.append({
+                        "id": pl.get('id'),
+                        "name": pl.get('name'),
+                        "tracks_total": (pl.get('tracks') or {}).get('total', 0)
+                    })
+            if len(items) < limit:
+                break
+            offset += limit
+
+        return jsonify(playlists)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/get_config')
 def get_config():

@@ -135,6 +135,32 @@ function handleScriptExecution(formId, outputId, endpoint) {
         for (let [key, value] of formData.entries()) {
             data[key] = value;
         }
+        // Convert toggle switches to 'y'/'n'
+        if (formId === 'libraryForm') {
+            const toggleMap = [
+                ['sync_starred', 'toggleSyncStarred'],
+                ['sync_playlists', 'toggleSyncPlaylists'],
+                ['import_liked', 'toggleImportLiked'],
+                ['import_playlists', 'toggleImportPlaylists']
+            ];
+            toggleMap.forEach(([key, id]) => {
+                const el = document.getElementById(id);
+                if (el) {
+                    data[key] = el.checked ? 'y' : 'n';
+                }
+            });
+        }
+        // Append selected playlists from chooser as comma-separated names
+        if (formId === 'libraryForm') {
+            const list = document.getElementById('playlistList');
+            if (list) {
+                const checked = Array.from(list.querySelectorAll('input[type="checkbox"][data-pl-name]:checked'))
+                    .map(cb => cb.getAttribute('data-pl-name'));
+                if (checked.length > 0) {
+                    data['playlists'] = checked.join(',');
+                }
+            }
+        }
         
         try {
             const response = await fetch(endpoint, {
@@ -249,6 +275,70 @@ if (djOptionsCollapse && djOptionsTriangle && djOptionsHeader) {
 
 // Spotify Authentication Management
 let spotifyAuthStatus = null;
+let playlistsLoaded = false;
+
+async function maybeLoadOwnedPlaylists() {
+    const chooser = document.getElementById('playlistChooser');
+    const list = document.getElementById('playlistList');
+    const search = document.getElementById('playlistSearch');
+    const selectAll = document.getElementById('selectAllPlaylists');
+    const manual = document.getElementById('playlistManualInput');
+    if (!chooser || !list) return;
+    if (!spotifyAuthStatus || !spotifyAuthStatus.authenticated) {
+        chooser.style.display = 'none';
+        if (manual) manual.style.display = '';
+        return;
+    }
+    if (playlistsLoaded && list.children.length > 0) {
+        chooser.style.display = 'block';
+        if (manual) manual.style.display = 'none';
+        return;
+    }
+    try {
+        const resp = await fetch('/spotify/playlists');
+        const data = await resp.json();
+        if (Array.isArray(data)) {
+            list.innerHTML = '';
+            data.forEach(pl => {
+                const id = `pl_${pl.id}`;
+                const row = document.createElement('div');
+                row.className = 'form-check';
+                row.dataset.filterText = (pl.name || '').toLowerCase();
+                row.innerHTML = `
+                    <input class="form-check-input" type="checkbox" id="${id}" data-pl-name="${pl.name || ''}">
+                    <label class="form-check-label" for="${id}">
+                        ${pl.name || ''} <span class="text-muted">(${pl.tracks_total || 0})</span>
+                    </label>`;
+                list.appendChild(row);
+            });
+            chooser.style.display = 'block';
+            if (manual) manual.style.display = 'none';
+            playlistsLoaded = true;
+
+            // Search filter
+            if (search) {
+                search.addEventListener('input', () => {
+                    const q = search.value.toLowerCase().trim();
+                    Array.from(list.children).forEach(row => {
+                        const t = row.dataset.filterText || '';
+                        row.style.display = t.includes(q) ? '' : 'none';
+                    });
+                });
+            }
+            // Select all
+            if (selectAll) {
+                selectAll.addEventListener('change', () => {
+                    const visibleBoxes = Array.from(list.querySelectorAll('input[type="checkbox"]'))
+                        .filter(cb => cb.closest('.form-check').style.display !== 'none');
+                    visibleBoxes.forEach(cb => cb.checked = selectAll.checked);
+                });
+            }
+        }
+    } catch (e) {
+        // Silently ignore; chooser stays hidden
+        if (manual) manual.style.display = '';
+    }
+}
 
 // Function to check Spotify authentication status
 async function checkSpotifyAuth() {
@@ -349,7 +439,10 @@ document.getElementById('spotifyLogoutBtn')?.addEventListener('click', async fun
 // Check Spotify auth status when library tab is shown
 document.querySelector('a[href="#libraryTab"]')?.addEventListener('click', function() {
     // Small delay to ensure tab is visible
-    setTimeout(checkSpotifyAuth, 100);
+    setTimeout(async () => {
+        await checkSpotifyAuth();
+        await maybeLoadOwnedPlaylists();
+    }, 100);
 });
 
 // Check auth status on page load if we're on the library tab
@@ -413,7 +506,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // Check auth status if we're on the library tab
     const libraryTab = document.getElementById('libraryTab');
     if (libraryTab && libraryTab.classList.contains('show')) {
-        checkSpotifyAuth();
+        (async () => {
+            await checkSpotifyAuth();
+            await maybeLoadOwnedPlaylists();
+        })();
     }
 });
 

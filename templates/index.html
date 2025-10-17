@@ -194,35 +194,53 @@
                 <form id="libraryForm">
                     <div class="row mb-3">
                         <div class="col-md-3 mb-2 mb-md-0">
-                            <label class="form-label">sync starred songs</label>
-                            <select class="form-control" name="sync_starred">
-                                <option value="n">no</option>
-                                <option value="y">yes</option>
-                            </select>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="toggleSyncStarred" name="sync_starred">
+                                <label class="form-check-label" for="toggleSyncStarred">sync starred songs from Navidrome</label>
+                            </div>
                         </div>
                         <div class="col-md-3 mb-2 mb-md-0">
-                            <label class="form-label">sync playlists</label>
-                            <select class="form-control" name="sync_playlists">
-                                <option value="n">no</option>
-                                <option value="y">yes</option>
-                            </select>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="toggleSyncPlaylists" name="sync_playlists">
+                                <label class="form-check-label" for="toggleSyncPlaylists">sync playlists from Navidrome</label>
+                            </div>
                         </div>
                         <div class="col-md-3 mb-2 mb-md-0">
-                            <label class="form-label">import liked songs</label>
-                            <select class="form-control" name="import_liked">
-                                <option value="n">no</option>
-                                <option value="y">yes</option>
-                            </select>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="toggleImportLiked" name="import_liked">
+                                <label class="form-check-label" for="toggleImportLiked">import liked songs from Spotify</label>
+                            </div>
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label">import playlists</label>
-                            <select class="form-control" name="import_playlists">
-                                <option value="n">no</option>
-                                <option value="y">yes</option>
-                            </select>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="toggleImportPlaylists" name="import_playlists">
+                                <label class="form-check-label" for="toggleImportPlaylists">import playlists from Spotify</label>
+                            </div>
                         </div>
                     </div>
-                    <div class="mb-3">
+                    <!-- Playlists chooser -->
+                    <div class="card mb-3" id="playlistChooser" style="display:none;">
+                        <div class="card-header">
+                            <h6 class="mb-0"><b>choose spotify playlists to import (owned only)</b></h6>
+                        </div>
+                        <div class="card-body">
+                            <div class="row g-2 align-items-center mb-2">
+                                <div class="col-md-6">
+                                    <input type="text" class="form-control" id="playlistSearch" placeholder="search your playlists...">
+                                </div>
+                                <div class="col-md-3 d-flex align-items-center">
+                                    <input type="checkbox" id="selectAllPlaylists" class="form-check-input me-2">
+                                    <label for="selectAllPlaylists" class="form-check-label">select all</label>
+                                </div>
+                                <div class="col-md-3 text-muted small">
+                                    selections are used only if "import playlists from Spotify" = yes
+                                </div>
+                            </div>
+                            <div id="playlistList" class="border rounded p-2" style="max-height: 240px; overflow: auto;"></div>
+                        </div>
+                    </div>
+                    <!-- Fallback manual input -->
+                    <div class="mb-3" id="playlistManualInput">
                         <label class="form-label">playlists (comma-separated, optional)</label>
                         <input type="text" class="form-control" name="playlists">
                     </div>
