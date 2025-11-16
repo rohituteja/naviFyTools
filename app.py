@@ -174,7 +174,7 @@ def run_dj():
 
     def run():
         try:
-            args = [sys.executable, os.path.join(os.path.dirname(__file__), 'naviDJ.py')]
+            args = [sys.executable, '-u', os.path.join(os.path.dirname(__file__), 'naviDJ.py')]
             if data.get('playlist_name'):
                 args += ['--playlist_name', str(data.get('playlist_name'))]
             if data.get('prompt'):
