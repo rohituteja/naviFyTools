@@ -268,6 +268,47 @@ def get_models(api_type):
     else:
         return jsonify({"error": "Invalid API type"})
 
+@app.route('/get_embedding_models/<api_type>')
+def get_embedding_models(api_type):
+    """Get available embedding models for the specified API type."""
+    secrets = read_secrets()
+    
+    if api_type == "ollama":
+        base_url = secrets.get("ollama", "ollama_base", fallback=None)
+        if not base_url:
+            return jsonify({"error": "Ollama base URL not configured"})
+        
+        try:
+            # Extract the base URL without the /v1 suffix for Ollama API
+            ollama_base = base_url.replace("/v1", "").rstrip("/")
+            response = requests.get(f"{ollama_base}/api/tags", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                all_models = [model["name"] for model in data.get("models", [])]
+                # Filter for models containing "embed" in the name
+                embedding_models = [model for model in all_models if "embed" in model.lower()]
+                return jsonify(embedding_models)
+            else:
+                return jsonify({"error": f"Failed to fetch models: {response.status_code}"})
+        except Exception as e:
+            return jsonify({"error": f"Error fetching embedding models: {str(e)}"})
+    
+    elif api_type == "openai":
+        # Return hardcoded list of OpenAI embedding models
+        openai_embedding_models = [
+            "text-embedding-3-small",
+            "text-embedding-3-large",
+            "text-embedding-ada-002"
+        ]
+        return jsonify(openai_embedding_models)
+    
+    elif api_type == "custom":
+        # Custom API doesn't support embeddings
+        return jsonify([])
+    
+    else:
+        return jsonify({"error": "Invalid API type"})
+
 @app.route('/spotify/login')
 def spotify_login():
     """Initiate Spotify OAuth login."""

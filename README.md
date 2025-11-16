@@ -126,6 +126,57 @@ To use the Spotify OAuth authentication in the web app, you need to create a Spo
 
 **Note:** If you change the port or domain where you host the Flask app, remember to update both your Spotify app settings and the `REDIRECT_URI` in your `secrets.txt` file.
 
+### Embedding Models (Optional but Recommended)
+
+When using Ollama or OpenAI as your LLM backend, you can optionally configure an embedding model to significantly improve performance. Embedding models are used for semantic search to pre-filter large lists of artists, genres, albums, and songs before sending them to the LLM. This reduces token usage by 80-90% while maintaining identical output quality.
+
+**Benefits:**
+- **Faster playlist generation**: Pre-filtering reduces the amount of data sent to the LLM
+- **Lower token costs**: Fewer tokens means lower API costs (for paid services) or faster processing
+- **Same quality**: The LLM still makes all final decisions, so output quality is identical
+
+**Setup for Ollama:**
+1. **Pull an embedding model** using Ollama:
+   ```bash
+   ollama pull nomic-embed-text
+   ```
+   Or for faster processing (lower quality):
+   ```bash
+   ollama pull all-minilm
+   ```
+
+2. **Configure in `secrets.txt`**:
+   ```
+   [ollama]
+   OLLAMA_BASE = http://localhost:11434/v1
+   EMBEDDING_MODEL = nomic-embed-text
+   ```
+
+**Setup for OpenAI:**
+1. **Configure in `secrets.txt`** (no need to pull models, they're available via API):
+   ```
+   [openai]
+   OPENAI_KEY = <your-openai-api-key>
+   EMBEDDING_MODEL = text-embedding-3-small
+   ```
+
+**Recommended Models:**
+- **Ollama:**
+  - **nomic-embed-text** (default): Best quality, recommended for most users
+  - **mxbai-embed-large**: High quality alternative
+  - **all-minilm**: Fastest option, good for speed-focused setups
+- **OpenAI:**
+  - **text-embedding-3-small** (default): Best balance of quality and cost
+  - **text-embedding-3-large**: Highest quality, higher cost
+  - **text-embedding-ada-002**: Older model, still functional
+
+**Important Notes:**
+- Embedding models work with both **Ollama and OpenAI** backends (not custom APIs)
+- If no embedding model is configured, the script works exactly as before - this is fully backward compatible
+- For Ollama: The embedding model must be pulled before use: `ollama pull <model-name>`
+- For OpenAI: Embedding models are available via API, no local installation needed
+- Embeddings are cached locally in `embeddings_cache.pkl` to avoid redundant API calls
+
 The playlist sync script does attempt to sync over playlist images, however Navidrome doesn't do anything with images that are sent with a playlist. Despite this, the DJ script still uses a DJ.png file try and set a default image for the playlists, which is included for you if you'd like to use or replace it. 
 
 ---

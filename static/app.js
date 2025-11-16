@@ -30,6 +30,7 @@ document.getElementById('configForm').addEventListener('submit', async (e) => {
 // LLM Configuration Management
 let currentLlmMode = 'openai';
 let currentLlmModel = '';
+let currentEmbeddingModel = '';
 
 // Function to show/hide API configuration sections
 function toggleApiConfig(mode) {
@@ -95,6 +96,66 @@ async function fetchModels(apiType) {
     }
 }
 
+// Function to fetch and populate embedding models
+async function fetchEmbeddingModels(apiType) {
+    const embeddingSelect = document.getElementById('embeddingModelSelect');
+    const embeddingContainer = document.getElementById('embeddingModelContainer');
+    
+    // Show/hide based on API type
+    if (apiType === 'ollama' || apiType === 'openai') {
+        embeddingContainer.style.display = 'block';
+        embeddingSelect.innerHTML = '<option value="">Loading models...</option>';
+        
+        // Update the name attribute based on API type
+        embeddingSelect.name = `${apiType}.embedding_model`;
+        embeddingSelect.setAttribute('data-section', apiType);
+        embeddingSelect.setAttribute('data-key', 'embedding_model');
+        
+        try {
+            const response = await fetch(`/get_embedding_models/${apiType}`);
+            const result = await response.json();
+            
+            if (result.error) {
+                embeddingSelect.innerHTML = `<option value="">Error: ${result.error}</option>`;
+                return;
+            }
+            
+            if (Array.isArray(result) && result.length > 0) {
+                embeddingSelect.innerHTML = '<option value="">Select a model...</option>';
+                result.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model;
+                    option.textContent = model;
+                    if (model === currentEmbeddingModel) {
+                        option.selected = true;
+                    }
+                    embeddingSelect.appendChild(option);
+                });
+                
+                // If we have a current model but it wasn't found in the list, 
+                // try to set it anyway
+                if (currentEmbeddingModel && !embeddingSelect.value) {
+                    const existingOption = Array.from(embeddingSelect.options).find(opt => 
+                        opt.value.toLowerCase().includes(currentEmbeddingModel.toLowerCase()) ||
+                        currentEmbeddingModel.toLowerCase().includes(opt.value.toLowerCase())
+                    );
+                    if (existingOption) {
+                        existingOption.selected = true;
+                        currentEmbeddingModel = existingOption.value;
+                    }
+                }
+            } else {
+                embeddingSelect.innerHTML = '<option value="">No embedding models available</option>';
+            }
+        } catch (error) {
+            embeddingSelect.innerHTML = '<option value="">Error loading embedding models</option>';
+            console.error('Error fetching embedding models:', error);
+        }
+    } else {
+        embeddingContainer.style.display = 'none';
+    }
+}
+
 
 // LLM mode change handler for config
 document.getElementById('llmModeSelect')?.addEventListener('change', async function(e) {
@@ -102,11 +163,17 @@ document.getElementById('llmModeSelect')?.addEventListener('change', async funct
     currentLlmMode = mode;
     toggleApiConfig(mode);
     await fetchModels(mode);
+    await fetchEmbeddingModels(mode);
 });
 
 // LLM model change handler for config
 document.getElementById('llmModelSelect')?.addEventListener('change', function(e) {
     currentLlmModel = e.target.value;
+});
+
+// Embedding model change handler for config
+document.getElementById('embeddingModelSelect')?.addEventListener('change', function(e) {
+    currentEmbeddingModel = e.target.value;
 });
 
 
@@ -466,12 +533,21 @@ document.addEventListener('DOMContentLoaded', function() {
                     currentLlmModel = config.llm.model;
                 }
                 
+                // Get embedding model from appropriate section
+                if (currentLlmMode === 'ollama' && config.ollama && config.ollama.embedding_model) {
+                    currentEmbeddingModel = config.ollama.embedding_model;
+                } else if (currentLlmMode === 'openai' && config.openai && config.openai.embedding_model) {
+                    currentEmbeddingModel = config.openai.embedding_model;
+                }
+                
                 // Fetch and populate models for the current mode
                 await fetchModels(currentLlmMode);
+                await fetchEmbeddingModels(currentLlmMode);
             } catch (error) {
                 console.error('Error initializing LLM config:', error);
                 // Still try to fetch models even if config fetch fails
                 await fetchModels(currentLlmMode);
+                await fetchEmbeddingModels(currentLlmMode);
             }
         }
     }

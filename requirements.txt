@@ -7,3 +7,4 @@ rapidfuzz
 mutagen
 configparser
 flask
+numpy

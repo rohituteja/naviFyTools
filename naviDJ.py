@@ -30,6 +30,13 @@ import argparse
 from typing import List, Dict  # optional, only for type hints
 import configparser
 from rapidfuzz import fuzz
+import logging
+
+# Import embedding manager (optional dependency)
+try:
+    from embeddings import EmbeddingManager
+except ImportError:
+    EmbeddingManager = None
 
 # --------------------------------------------------
 # CONFIG & LLM CLIENT SETUP
@@ -46,6 +53,8 @@ DEFAULT_CUSTOM_BASE_URL = secrets.get("custom", "base_url", fallback=None)
 
 DEFAULT_LLM_MODE = secrets.get("llm", "mode", fallback="openai").lower()
 DEFAULT_LLM_MODEL = secrets.get("llm", "model", fallback=None)
+DEFAULT_OLLAMA_EMBEDDING_MODEL = secrets.get("ollama", "embedding_model", fallback="nomic-embed-text")
+DEFAULT_OPENAI_EMBEDDING_MODEL = secrets.get("openai", "embedding_model", fallback="text-embedding-3-small")
 
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)
 SUBSONIC_AUTH_PARAMS = {
@@ -59,6 +68,7 @@ SUBSONIC_AUTH_PARAMS = {
 LLM_MODE: str = DEFAULT_LLM_MODE  # 'openai' | 'ollama'
 LLM_MODEL: str = DEFAULT_LLM_MODEL or ""  # auto‑filled later
 client: OpenAI | None = None  # global client instance
+embedding_mgr = None  # global embedding manager instance (optional)
 
 # --------------------------------------------------
 # HELPER FOR CLEANING LLM OUTPUT
@@ -95,9 +105,38 @@ def _split_artist_string(artist_string: str) -> list[str]:
 # LLM CLIENT INITIALISATION
 # --------------------------------------------------
 
+def configure_embeddings(api_type: str, model_name: str, base_url: str = None, api_key: str = None) -> None:
+    """
+    Initialize the global embedding manager.
+    
+    Args:
+        api_type: Type of API to use ("ollama" or "openai")
+        model_name: Name of the embedding model
+        base_url: Base URL for Ollama or OpenAI (optional for OpenAI, defaults to https://api.openai.com/v1)
+        api_key: API key for OpenAI (required for OpenAI, not used for Ollama)
+    """
+    global embedding_mgr
+    
+    if EmbeddingManager is None:
+        logging.warning("EmbeddingManager not available. Install required dependencies to use embeddings.")
+        embedding_mgr = None
+        return
+    
+    try:
+        embedding_mgr = EmbeddingManager(
+            api_type=api_type,
+            model_name=model_name,
+            base_url=base_url,
+            api_key=api_key
+        )
+        logging.info(f"Embedding manager initialized with {api_type} model: {model_name}")
+    except Exception as e:
+        logging.warning(f"Failed to initialize embedding manager: {e}. Continuing without embeddings.")
+        embedding_mgr = None
+
 def configure_llm(mode: str = None, model: str = None) -> None:
     """Initialise the global `client`, `LLM_MODE`, and `LLM_MODEL` based on *mode* and *model*."""
-    global LLM_MODE, LLM_MODEL, client
+    global LLM_MODE, LLM_MODEL, client, embedding_mgr
 
     # Use secrets.txt defaults if not provided
     mode = (mode or DEFAULT_LLM_MODE or "openai").lower()
@@ -111,13 +150,20 @@ def configure_llm(mode: str = None, model: str = None) -> None:
     if mode == "openai":
         LLM_MODEL = model or "gpt-4o-mini"
         client = OpenAI(api_key=DEFAULT_OPENAI_KEY)
+        # Initialize embedding manager for OpenAI
+        if DEFAULT_OPENAI_KEY:
+            configure_embeddings("openai", DEFAULT_OPENAI_EMBEDDING_MODEL, api_key=DEFAULT_OPENAI_KEY)
     elif mode == "ollama":
         LLM_MODEL = model or "gemma3n:latest"  # e.g. 'llama3' or 'mistral-7b-instruct'
         # Ollama's shim at /v1 is OpenAI‑compatible; any string works as the key.
         client = OpenAI(api_key="ollama", base_url=DEFAULT_OLLAMA_BASE)
+        # Initialize embedding manager for Ollama
+        if DEFAULT_OLLAMA_BASE:
+            configure_embeddings("ollama", DEFAULT_OLLAMA_EMBEDDING_MODEL, base_url=DEFAULT_OLLAMA_BASE)
     else:  # custom
         LLM_MODEL = model or "gpt-4o-mini"
         client = OpenAI(api_key=DEFAULT_CUSTOM_API_KEY, base_url=DEFAULT_CUSTOM_BASE_URL)
+        embedding_mgr = None  # Embeddings not supported with custom API
 
 # --------------------------------------------------
 # SUBSONIC HELPERS
@@ -215,8 +261,8 @@ def _strip_fences(text: str) -> str:
     return text
 
 
-def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[str]:
-    """Returns JSON-only; caller can safely json.loads() the result."""
+def _llm_select_items(prompt: str, items: list[str], n: int, label: str) -> list[str]:
+    """Internal function that performs LLM-based selection. Returns JSON-only; caller can safely json.loads() the result."""
     system_msg = {
         "role": "system",
         "content": (
@@ -252,6 +298,29 @@ def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[
         pass
     return items[:n]
 
+
+def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[str]:
+    """
+    Select top n items using LLM, with optional embedding-based pre-filtering.
+    If embedding_mgr is available and items list has >200 items, pre-filter to top 200
+    using embeddings before sending to LLM. Otherwise, use LLM directly on all items.
+    """
+    # Pre-filter with embeddings if available and list is large
+    if embedding_mgr is not None and len(items) > 200:
+        try:
+            pre_filtered = embedding_mgr.find_similar(prompt, items, top_k=200)
+            if pre_filtered:
+                print(f"[INFO] Pre-filtered {len(items)} {label} to {len(pre_filtered)} using embeddings")
+                return _llm_select_items(prompt, pre_filtered, n, label)
+            else:
+                # Fallback if embedding filtering failed
+                logging.warning("Embedding pre-filtering returned empty, using all items")
+        except Exception as e:
+            logging.warning(f"Embedding pre-filtering failed: {e}. Using all items.")
+    
+    # Use LLM directly (either no embeddings available, or list is small)
+    return _llm_select_items(prompt, items, n, label)
+
 # --------------------------------------------------
 # PLAYLIST GENERATION
 # --------------------------------------------------
@@ -269,11 +338,42 @@ def generate_playlist(
     required_ratio: float,
     existing_playlists: list[dict] = [],
 ) -> list[dict]:
-    """Returns JSON-only; caller can safely json.loads() the result."""
+    """
+    Generate playlist using LLM, with optional embedding-based pre-filtering.
+    If embedding_mgr is available, pre-filter songs to ~60% of original size using embeddings
+    before chunking and processing. Returns JSON-only; caller can safely json.loads() the result.
+    """
+    # Pre-filter with embeddings if available
+    songs_to_use = songs
+    if embedding_mgr is not None:
+        try:
+            # Create text representations: "song title by artist name - genre"
+            song_texts = []
+            for song in songs:
+                title = song.get("title", "")
+                artist = song.get("artist", "")
+                genre = song.get("genre", "")
+                text = f"{title} by {artist}"
+                if genre:
+                    text += f" - {genre}"
+                song_texts.append(text)
+            
+            # Pre-filter to ~60% of original size
+            target_size = max(1, int(len(songs) * 0.6))
+            if len(songs) > target_size:
+                similar_indices = embedding_mgr.find_similar_indices(prompt, song_texts, top_k=target_size)
+                if similar_indices:
+                    songs_to_use = [songs[i] for i in similar_indices]
+                    print(f"[INFO] Pre-filtered {len(songs)} songs to {len(songs_to_use)} using embeddings")
+                else:
+                    logging.warning("Embedding pre-filtering returned empty, using all songs")
+        except Exception as e:
+            logging.warning(f"Embedding pre-filtering failed: {e}. Using all songs.")
+    
     playlist = []
-    bar = tqdm(total=len(songs), desc="Building playlist", unit="song", dynamic_ncols=True)
+    bar = tqdm(total=len(songs_to_use), desc="Building playlist", unit="song", dynamic_ncols=True)
 
-    for chunk in chunk_list(songs, chunk_size):
+    for chunk in chunk_list(songs_to_use, chunk_size):
         chunk_json = json.dumps(chunk).replace("```", "`\u200c`\u200c`")
 
         # How many songs must this chunk contribute?
@@ -599,9 +699,24 @@ def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: lis
 def select_relevant_albums_llm(prompt: str, all_albums: list[str], n: int = 5) -> list[str]:
     """
     Use the LLM to select up to n relevant albums from all_albums for the given prompt.
+    If embedding_mgr is available and album list has >50 items, pre-filter to 50 using embeddings.
     The LLM must return a JSON object: {"albums": [ ... ]} (never a list or dict with other keys).
     Only albums in all_albums are valid. If the response is not valid, return [].
     """
+    # Pre-filter with embeddings if available and list is large
+    albums_to_use = all_albums
+    if embedding_mgr is not None and len(all_albums) > 50:
+        try:
+            pre_filtered = embedding_mgr.find_similar(prompt, all_albums, top_k=50)
+            if pre_filtered:
+                print(f"[INFO] Pre-filtered {len(all_albums)} albums to {len(pre_filtered)} using embeddings")
+                albums_to_use = pre_filtered
+            else:
+                # Fallback if embedding filtering failed
+                logging.warning("Embedding pre-filtering returned empty, using all albums")
+        except Exception as e:
+            logging.warning(f"Embedding pre-filtering failed: {e}. Using all albums.")
+    
     system_msg = {
         "role": "system",
         "content": (
@@ -617,7 +732,7 @@ def select_relevant_albums_llm(prompt: str, all_albums: list[str], n: int = 5) -
     user_msg = {
         "role": "user",
         "content": (
-            f"Vibe prompt: \"{prompt}\"\n\nAvailable albums ({len(all_albums)}): {all_albums}\n\n"
+            f"Vibe prompt: \"{prompt}\"\n\nAvailable albums ({len(albums_to_use)}): {albums_to_use}\n\n"
             f"Respond with **ONLY** a JSON object: {{\"albums\": [ ... ]}} (no extra keys, no prose)."
         ),
     }
