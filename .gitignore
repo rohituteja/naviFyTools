@@ -3,3 +3,4 @@ secrets.txt
 .cache-spotify
 __pycache__/
 embeddings_cache.pkl
+pipenv/
