@@ -234,7 +234,7 @@ def _llm_chat(messages: list[dict]) -> str:
     
     # For Ollama, pass the context length option
     if LLM_MODE == "ollama" and LLM_CONTEXT_LENGTH:
-        extra_args["extra_body"] = {"options": {"num_ctx": LLM_CONTEXT_LENGTH}}
+        extra_args["extra_body"] = {"num_ctx": LLM_CONTEXT_LENGTH}
 
     try:
         resp = client.chat.completions.create(
@@ -365,8 +365,8 @@ def generate_playlist(
                     text += f" - {genre}"
                 song_texts.append(text)
             
-            # Pre-filter to ~60% of original size
-            target_size = max(1, int(len(songs) * 0.6))
+            # Pre-filter to ~60% of original size, but capped at 400 items to keep LLM workload reasonable
+            target_size = min(len(songs), 400)
             if len(songs) > target_size:
                 similar_indices = embedding_mgr.find_similar_indices(prompt, song_texts, top_k=target_size)
                 if similar_indices:
@@ -896,11 +896,11 @@ def _main_impl(args):
     # Determine chunk size based on LLM mode and settings
     if LLM_MODE == "ollama":
         # Get context length from secrets (default 2048)
-        context_len = int(secrets.get("ollama", "context_length", fallback=2048))
+        context_len = int(secrets.get("ollama", "context_length", fallback=4096))
         
-        # Estimate: ~50 tokens per song entry + ~1000 tokens for system/prompt overhead
-        # Safety margin: aim to use ~80% of context
-        available_tokens = context_len * 0.8 - 1000
+        # Estimate: ~50 tokens per song entry
+        # Safety margin: aim to use ~90% of total context
+        available_tokens = context_len * 0.9
         estimated_songs = max(10, int(available_tokens / 50))
         
         chunk_size = estimated_songs

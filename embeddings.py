@@ -154,6 +154,106 @@ class EmbeddingManager:
             logger.warning(f"Unexpected error getting embedding: {e}")
             return None
     
+    def get_embeddings_batch(self, texts: List[str], force_refresh: bool = False) -> List[Optional[np.ndarray]]:
+        """
+        Get embeddings for a list of text strings, using cache if available.
+        Batches API calls where possible.
+        
+        Args:
+            texts: List of text strings to embed
+            force_refresh: If True, bypass cache and fetch new embeddings
+            
+        Returns:
+            List of (numpy array or None) corresponding to the input texts
+        """
+        if not texts:
+            return []
+            
+        results = [None] * len(texts)
+        uncached_indices = []
+        uncached_texts = []
+        
+        # Check cache
+        for i, text in enumerate(texts):
+            if not text:
+                continue
+            if not force_refresh and text in self.cache:
+                results[i] = self.cache[text]
+            else:
+                uncached_indices.append(i)
+                uncached_texts.append(text)
+        
+        if not uncached_texts:
+            return results
+
+        # Process uncached items in batches
+        BATCH_SIZE = 100  # Conservative batch size
+        
+        for i in range(0, len(uncached_texts), BATCH_SIZE):
+            batch_texts = uncached_texts[i : i + BATCH_SIZE]
+            batch_indices = uncached_indices[i : i + BATCH_SIZE]
+            
+            try:
+                if self.api_type == "ollama":
+                    # Try using the batch-enabled /api/embed endpoint first
+                    url = f"{self.base_url}/api/embed"
+                    payload = {
+                        "model": self.model_name,
+                        "input": batch_texts
+                    }
+                    try:
+                        response = requests.post(url, json=payload, timeout=60)
+                        
+                        # If 404, the endpoint might not exist (older Ollama), fallback to serial
+                        if response.status_code == 404:
+                            raise NotImplementedError("Ollama /api/embed not found")
+                        
+                        response.raise_for_status()
+                        data = response.json()
+                        embeddings_list = data.get("embeddings", [])
+                        
+                        for j, embedding_data in enumerate(embeddings_list):
+                            embedding = np.array(embedding_data, dtype=np.float32)
+                            self.cache[batch_texts[j]] = embedding
+                            results[batch_indices[j]] = embedding
+                            
+                    except (requests.exceptions.RequestException, NotImplementedError):
+                        # Fallback to serial processing for older Ollama or errors
+                        logger.info("Batch embedding failed or not supported by Ollama version, falling back to serial.")
+                        for j, text in enumerate(batch_texts):
+                            embedding = self.get_embedding(text, force_refresh=True)
+                            results[batch_indices[j]] = embedding
+
+                else:  # openai
+                    url = f"{self.base_url}/embeddings"
+                    payload = {
+                        "model": self.model_name,
+                        "input": batch_texts
+                    }
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    }
+                    
+                    response = requests.post(url, json=payload, headers=headers, timeout=60)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    # OpenAI guarantees order matches input
+                    for item in data.get("data", []):
+                        idx = item["index"]
+                        # Robustness check: ensure index is within bounds of this batch
+                        if 0 <= idx < len(batch_texts):
+                            embedding = np.array(item["embedding"], dtype=np.float32)
+                            self.cache[batch_texts[idx]] = embedding
+                            results[batch_indices[idx]] = embedding
+                            
+            except Exception as e:
+                logger.warning(f"Batch embedding generation failed: {e}")
+        
+        self._save_cache()
+        return results
+
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """
         Calculate cosine similarity between two vectors.
@@ -190,48 +290,8 @@ class EmbeddingManager:
         Returns:
             List of top_k most similar candidate strings
         """
-        if not candidates or top_k <= 0:
-            return []
-        
-        if len(candidates) <= top_k:
-            return candidates
-        
-        try:
-            query_embedding = self.get_embedding(query)
-            if query_embedding is None:
-                logger.warning("Failed to get query embedding, returning first top_k candidates")
-                return candidates[:top_k]
-            
-            # Get embeddings for all candidates
-            similarities = []
-            for candidate in candidates:
-                candidate_embedding = self.get_embedding(candidate)
-                if candidate_embedding is None:
-                    continue
-                
-                # Check for dimension mismatch
-                if candidate_embedding.shape != query_embedding.shape:
-                    logger.warning(f"Dimension mismatch: query {query_embedding.shape} vs candidate {candidate_embedding.shape}. Re-fetching...")
-                    # Force refresh the embedding
-                    candidate_embedding = self.get_embedding(candidate, force_refresh=True)
-                    if candidate_embedding is None or candidate_embedding.shape != query_embedding.shape:
-                        logger.warning(f"Could not resolve dimension mismatch for candidate. Skipping.")
-                        continue
-
-                similarity = self._cosine_similarity(query_embedding, candidate_embedding)
-                similarities.append((similarity, candidate))
-            
-            if not similarities:
-                logger.warning("No valid embeddings generated, returning first top_k candidates")
-                return candidates[:top_k]
-            
-            # Sort by similarity (descending) and return top_k
-            similarities.sort(key=lambda x: x[0], reverse=True)
-            return [candidate for _, candidate in similarities[:top_k]]
-            
-        except Exception as e:
-            logger.warning(f"Error in find_similar: {e}. Returning first top_k candidates.")
-            return candidates[:top_k]
+        indices = self.find_similar_indices(query, candidates, top_k)
+        return [candidates[i] for i in indices]
     
     def find_similar_indices(self, query: str, candidates: List[str], top_k: int) -> List[int]:
         """
@@ -257,21 +317,18 @@ class EmbeddingManager:
                 logger.warning("Failed to get query embedding, returning first top_k indices")
                 return list(range(min(top_k, len(candidates))))
             
-            # Get embeddings for all candidates
+            # Get embeddings for all candidates in batch
+            candidate_embeddings = self.get_embeddings_batch(candidates)
+            
             similarities = []
-            for idx, candidate in enumerate(candidates):
-                candidate_embedding = self.get_embedding(candidate)
+            for idx, candidate_embedding in enumerate(candidate_embeddings):
                 if candidate_embedding is None:
                     continue
 
                 # Check for dimension mismatch
                 if candidate_embedding.shape != query_embedding.shape:
-                    logger.warning(f"Dimension mismatch: query {query_embedding.shape} vs candidate {candidate_embedding.shape}. Re-fetching...")
-                    # Force refresh the embedding
-                    candidate_embedding = self.get_embedding(candidate, force_refresh=True)
-                    if candidate_embedding is None or candidate_embedding.shape != query_embedding.shape:
-                        logger.warning(f"Could not resolve dimension mismatch for candidate. Skipping.")
-                        continue
+                    logger.warning(f"Dimension mismatch: query {query_embedding.shape} vs candidate {candidate_embedding.shape}. Skipping.")
+                    continue
                 
                 similarity = self._cosine_similarity(query_embedding, candidate_embedding)
                 similarities.append((similarity, idx))
