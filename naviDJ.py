@@ -67,6 +67,7 @@ SUBSONIC_AUTH_PARAMS = {
 # Will be overwritten in `configure_llm` but need a placeholder so _llm_chat can be defined early.
 LLM_MODE: str = DEFAULT_LLM_MODE  # 'openai' | 'ollama'
 LLM_MODEL: str = DEFAULT_LLM_MODEL or ""  # auto‑filled later
+LLM_CONTEXT_LENGTH: int | None = None
 client: OpenAI | None = None  # global client instance
 embedding_mgr = None  # global embedding manager instance (optional)
 
@@ -146,6 +147,8 @@ def configure_llm(mode: str = None, model: str = None) -> None:
         raise ValueError("Unsupported LLM_MODE. Choose 'openai', 'ollama', or 'custom'.")
 
     LLM_MODE = mode
+    global LLM_CONTEXT_LENGTH
+    LLM_CONTEXT_LENGTH = int(secrets.get("ollama", "context_length", fallback=2048)) if mode == "ollama" else None
 
     if mode == "openai":
         LLM_MODEL = model or "gpt-4o-mini"
@@ -228,6 +231,10 @@ def _llm_chat(messages: list[dict]) -> str:
     extra_args: dict[str, object] = {}
     # Ask for structured JSON output whenever the backend supports it.
     extra_args["response_format"] = {"type": "json_object"}
+    
+    # For Ollama, pass the context length option
+    if LLM_MODE == "ollama" and LLM_CONTEXT_LENGTH:
+        extra_args["extra_body"] = {"options": {"num_ctx": LLM_CONTEXT_LENGTH}}
 
     try:
         resp = client.chat.completions.create(
@@ -886,10 +893,20 @@ def _main_impl(args):
     # We need at least args.min_songs tracks in total → derive a ratio
     required_ratio = args.min_songs / max(1, len(combined_songs))
 
-    # Use 500 chunk size for Ollama cloud models, 150 for regular Ollama, 500 for others
+    # Determine chunk size based on LLM mode and settings
     if LLM_MODE == "ollama":
-        chunk_size = 500 if LLM_MODEL.endswith("-cloud") else 150
+        # Get context length from secrets (default 2048)
+        context_len = int(secrets.get("ollama", "context_length", fallback=2048))
+        
+        # Estimate: ~50 tokens per song entry + ~1000 tokens for system/prompt overhead
+        # Safety margin: aim to use ~80% of context
+        available_tokens = context_len * 0.8 - 1000
+        estimated_songs = max(10, int(available_tokens / 50))
+        
+        chunk_size = estimated_songs
+        print(f"Ollama mode: context length {context_len} -> batch size {chunk_size}")
     else:
+        # OpenAI supports large contexts, set a healthy default
         chunk_size = 500
     playlist_items = generate_playlist(
         prompt,

@@ -4,3 +4,4 @@ secrets.txt
 __pycache__/
 embeddings_cache.pkl
 pipenv/
+*.pkl

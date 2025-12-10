@@ -8,6 +8,7 @@ import pickle
 import logging
 import requests
 import numpy as np
+import re
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,15 @@ class EmbeddingManager:
         if api_type not in {"ollama", "openai"}:
             raise ValueError(f"Unsupported API type: {api_type}. Must be 'ollama' or 'openai'.")
         
+            raise ValueError(f"Unsupported API type: {api_type}. Must be 'ollama' or 'openai'.")
+        
         self.api_type = api_type
         self.model_name = model_name
-        self.cache_file = cache_file
+        
+        # Sanitize model name for filename
+        safe_model_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', model_name)
+        self.cache_file = f"embeddings_cache_{safe_model_name}.pkl"
+        
         self.cache: dict[str, np.ndarray] = {}
         
         if api_type == "ollama":
@@ -77,12 +84,13 @@ class EmbeddingManager:
         except Exception as e:
             logger.warning(f"Failed to save cache to {self.cache_file}: {e}")
     
-    def get_embedding(self, text: str) -> Optional[np.ndarray]:
+    def get_embedding(self, text: str, force_refresh: bool = False) -> Optional[np.ndarray]:
         """
         Get embedding for a text string, using cache if available.
         
         Args:
             text: Text string to embed
+            force_refresh: If True, bypass cache and fetch new embedding
             
         Returns:
             numpy array of embedding, or None if embedding generation fails
@@ -91,7 +99,7 @@ class EmbeddingManager:
             return None
         
         # Check cache first
-        if text in self.cache:
+        if not force_refresh and text in self.cache:
             return self.cache[text]
         
         # Generate embedding via API
@@ -201,6 +209,15 @@ class EmbeddingManager:
                 if candidate_embedding is None:
                     continue
                 
+                # Check for dimension mismatch
+                if candidate_embedding.shape != query_embedding.shape:
+                    logger.warning(f"Dimension mismatch: query {query_embedding.shape} vs candidate {candidate_embedding.shape}. Re-fetching...")
+                    # Force refresh the embedding
+                    candidate_embedding = self.get_embedding(candidate, force_refresh=True)
+                    if candidate_embedding is None or candidate_embedding.shape != query_embedding.shape:
+                        logger.warning(f"Could not resolve dimension mismatch for candidate. Skipping.")
+                        continue
+
                 similarity = self._cosine_similarity(query_embedding, candidate_embedding)
                 similarities.append((similarity, candidate))
             
@@ -246,6 +263,15 @@ class EmbeddingManager:
                 candidate_embedding = self.get_embedding(candidate)
                 if candidate_embedding is None:
                     continue
+
+                # Check for dimension mismatch
+                if candidate_embedding.shape != query_embedding.shape:
+                    logger.warning(f"Dimension mismatch: query {query_embedding.shape} vs candidate {candidate_embedding.shape}. Re-fetching...")
+                    # Force refresh the embedding
+                    candidate_embedding = self.get_embedding(candidate, force_refresh=True)
+                    if candidate_embedding is None or candidate_embedding.shape != query_embedding.shape:
+                        logger.warning(f"Could not resolve dimension mismatch for candidate. Skipping.")
+                        continue
                 
                 similarity = self._cosine_similarity(query_embedding, candidate_embedding)
                 similarities.append((similarity, idx))

@@ -84,6 +84,16 @@
                                        data-key="ollama_base"
                                        placeholder="http://localhost:11434/v1">
                             </div>
+                            <div class="mb-3">
+                                <label class="form-label">Context Length</label>
+                                <input type="number" class="form-control" 
+                                       name="ollama.context_length"
+                                       value="{{ config.get('ollama', 'context_length', fallback='2048') }}"
+                                       data-section="ollama"
+                                       data-key="context_length"
+                                       placeholder="2048">
+                                <small class="form-text text-muted">Set the context window size (e.g., 2048, 4096, 8192). Controls how many songs are processed at once.</small>
+                            </div>
                         </div>
 
                         <div id="customConfig" class="config-section mb-2" style="display: none;">
