@@ -9,6 +9,8 @@ A set of utilities for syncing playlists between Subsonic/Navidrome and Spotify 
 - **portGenres.py**: Updates local music file genres using MusicBrainz tags. The DJ script uses genres to filter songs by, and more detailed genres, such as those from MusicBrainz, helps it filter more effectively, but by no means am I asking you to overwrite all your genres on your files to use these scripts. I'd be interested to see how the DJ performs with different types of metadata and how people tag their genres.
 - **Web App**: Modern web interface with configuration management, Spotify login, model picker, real-time output, and a playlist chooser for selecting owned Spotify playlists when importing.
 
+**Note on Open WebUI**: This project fully supports Open WebUI! You can use it as a robust proxy for Ollama by selecting "ollama" mode and pointing the URL to your Open WebUI instance. This allows you to leverage Open WebUI's features like custom context lengths and model management while using naviDJ.
+
 ## Web App (Flask UI)
 
 A simple web interface is now available for managing your naviFy tools!
@@ -54,12 +56,19 @@ MUSIC_DIR = <path to your music directory here>
 MODE = openai
 # e.g. gpt-4o-mini, gpt-3.5-turbo, deepseek-r1:latest, gemma3n:latest, etc.
 MODEL = gpt-4o-mini
+# Number of songs to process at once. Lower values reduce token usage but may be slower.
+# Default: 500
+CHUNK_SIZE = 500
 
 [openai]
 OPENAI_KEY = <your-openai-api-key>
 
 [ollama]
-OLLAMA_BASE = <your-ollama-url>
+# For local Ollama: http://localhost:11434/v1
+# For Open WebUI: http://localhost:3000/api (Use API Key from Open WebUI settings)
+OLLAMA_BASE = <your-ollama-or-openwebui-url>
+# Optional: API Key for Open WebUI or protected Ollama instances
+API_KEY = <your-api-key>
 
 [custom]
 # Use a custom OpenAI-compatible API (optional)

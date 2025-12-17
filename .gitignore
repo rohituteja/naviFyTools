@@ -5,3 +5,8 @@ __pycache__/
 embeddings_cache.pkl
 pipenv/
 *.pkl
+.DS_Store
+.env
+venv/
+.idea/
+.vscode/
