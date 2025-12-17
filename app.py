@@ -147,7 +147,13 @@ def get_available_models(api_type, api_key=None, base_url=None):
             except Exception as e:
                 return {"error": f"Failed to fetch models from both /tags and /models: {str(e)}"}
                 
-            return {"error": f"Failed to fetch models. Status code: {response.status_code if 'response' in locals() else 'Unknown'}"}
+            error_msg = f"Failed to fetch models. Status: {response.status_code}"
+            if 'response' in locals():
+                try:
+                    error_msg += f" - {response.text}"
+                except:
+                    pass
+            return {"error": error_msg}
         elif api_type == "custom":
             if not base_url or not api_key:
                 return {"error": "Custom API base URL and API key required"}
