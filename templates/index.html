@@ -91,20 +91,23 @@
                         </div>
 
                         <div id="ollamaConfig" class="config-section mb-2" style="display: none;">
-                            <h5>Ollama Configuration</h5>
+                            <h5>Ollama / Open WebUI Configuration</h5>
                             <div class="mb-3">
-                                <label class="form-label">Ollama Base URL</label>
+                                <label class="form-label">Base URL</label>
                                 <input type="text" class="form-control" name="ollama.ollama_base"
                                     value="{{ config.get('ollama', 'ollama_base', fallback='') }}" data-section="ollama"
-                                    data-key="ollama_base" placeholder="http://localhost:11434/v1">
+                                    data-key="ollama_base"
+                                    placeholder="http://localhost:11434/v1 or http://localhost:3000/api">
+                                <small class="form-text text-muted">For Ollama: http://localhost:11434/v1 | For Open
+                                    WebUI: http://localhost:3000/api</small>
                             </div>
                             <div class="mb-3">
-                                <label class="form-label">Ollama API Key (Optional)</label>
+                                <label class="form-label">API Key (Optional)</label>
                                 <input type="password" class="form-control" name="ollama.api_key"
                                     value="{{ config.get('ollama', 'api_key', fallback='') }}" data-section="ollama"
-                                    data-key="api_key" placeholder="Leave blank for local instances">
-                                <small class="form-text text-muted">Only required for Ollama instances with
-                                    authentication enabled</small>
+                                    data-key="api_key" placeholder="Leave blank for local Ollama">
+                                <small class="form-text text-muted">Required for Open WebUI (generate in Settings >
+                                    Account > API Keys). Optional for local Ollama without authentication.</small>
                             </div>
                         </div>
 

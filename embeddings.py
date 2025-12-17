@@ -52,7 +52,8 @@ class EmbeddingManager:
                 raise ValueError("base_url is required for Ollama")
             # Normalize Ollama URL for API calls
             self.base_url = normalize_ollama_url(base_url)
-            self.api_key = None
+            # Store API key for Open WebUI authentication (optional for local Ollama)
+            self.api_key = api_key
         else:  # openai
             if not api_key:
                 raise ValueError("api_key is required for OpenAI")
@@ -179,6 +180,9 @@ class EmbeddingManager:
                     "prompt": text
                 }
                 headers = {}
+                # Add Authorization header for Open WebUI if API key is present
+                if self.api_key:
+                    headers["Authorization"] = f"Bearer {self.api_key}"
             else:  # openai
                 url = f"{self.base_url}/embeddings"
                 payload = {
@@ -269,8 +273,12 @@ class EmbeddingManager:
                         "model": self.model_name,
                         "input": batch_texts
                     }
+                    headers = {}
+                    # Add Authorization header for Open WebUI if API key is present
+                    if self.api_key:
+                        headers["Authorization"] = f"Bearer {self.api_key}"
                     try:
-                        response = requests.post(url, json=payload, timeout=60)
+                        response = requests.post(url, json=payload, headers=headers, timeout=60)
                         
                         # If 404, the endpoint might not exist (older Ollama), fallback to serial
                         if response.status_code == 404:
