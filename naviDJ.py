@@ -233,7 +233,7 @@ def _llm_chat(messages: list[dict]) -> str:
     
     # For Ollama, add context length via extra_body to improve generation speed
     if LLM_MODE == "ollama":
-        extra_args["extra_body"] = {"options": {"num_ctx": OLLAMA_CONTEXT_LENGTH}}
+        extra_args["extra_body"] = {"num_ctx": OLLAMA_CONTEXT_LENGTH}
 
     try:
         resp = client.chat.completions.create(
