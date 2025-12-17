@@ -227,36 +227,45 @@ def fetch_all_subsonic_songs() -> list[dict]:
 def _llm_chat(messages: list[dict]) -> str:
     """Universal chat helper that works for both OpenAI & Ollama and always returns clean JSON-only content."""
 
-    extra_args: dict[str, object] = {}
-    # Ask for structured JSON output whenever the backend supports it.
-    extra_args["response_format"] = {"type": "json_object"}
-    
-    # For Ollama, add context length via extra_body to improve generation speed
-    if LLM_MODE == "ollama":
-        extra_args["extra_body"] = {"num_ctx": OLLAMA_CONTEXT_LENGTH}
-
     try:
-        resp = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=messages,
-            stream=False,
-            **extra_args,
-        )
+        # Build parameters based on LLM mode
+        if LLM_MODE == "ollama":
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                stream=False,
+                response_format={"type": "json_object"},
+                extra_body={"num_ctx": OLLAMA_CONTEXT_LENGTH}
+            )
+        else:
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                stream=False,
+                response_format={"type": "json_object"}
+            )
     except TypeError:
         # Fallback for older openai‑python that doesn't know `response_format`.
-        extra_args.pop("response_format", None)
-        resp = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=messages,
-            stream=False,
-            **extra_args,
-        )
+        if LLM_MODE == "ollama":
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                stream=False,
+                extra_body={"num_ctx": OLLAMA_CONTEXT_LENGTH}
+            )
+        else:
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                stream=False,
+            )
         
         # Extract and log token usage
         if resp.usage:
             logging.info(f"LLM Token Usage - Prompt: {resp.usage.prompt_tokens}, Completion: {resp.usage.completion_tokens}, Total: {resp.usage.total_tokens}")
         else:
             logging.info("LLM Token Usage: Not available in response.")
+
  
     # Remove any Ollama <think>...</think> traces *before* returning content.
     content = resp.choices[0].message.content
