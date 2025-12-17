@@ -231,9 +231,9 @@ def _llm_chat(messages: list[dict]) -> str:
     # Ask for structured JSON output whenever the backend supports it.
     extra_args["response_format"] = {"type": "json_object"}
     
-    # For Ollama, add context length options to improve generation speed
+    # For Ollama, add context length via extra_body to improve generation speed
     if LLM_MODE == "ollama":
-        extra_args["options"] = {"num_ctx": OLLAMA_CONTEXT_LENGTH}
+        extra_args["extra_body"] = {"options": {"num_ctx": OLLAMA_CONTEXT_LENGTH}}
 
     try:
         resp = client.chat.completions.create(
