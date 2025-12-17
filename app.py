@@ -12,6 +12,7 @@ from openai import OpenAI
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import json
+from ollama_utils import normalize_ollama_url
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # Required for session management
@@ -116,9 +117,9 @@ def get_available_models(api_type, api_key=None, base_url=None):
         elif api_type == "ollama":
             if not base_url:
                 return {"error": "Ollama base URL required"}
-            # Extract the base URL without the /v1 suffix for Ollama API
-            ollama_base = base_url.replace("/v1", "")
-            response = requests.get(f"{ollama_base}/api/tags")
+            # Normalize the URL for Ollama API calls
+            ollama_base = normalize_ollama_url(base_url)
+            response = requests.get(f"{ollama_base}/tags")
             if response.status_code == 200:
                 data = response.json()
                 return [model["name"] for model in data.get("models", [])]
@@ -279,9 +280,9 @@ def get_embedding_models(api_type):
             return jsonify({"error": "Ollama base URL not configured"})
         
         try:
-            # Extract the base URL without the /v1 suffix for Ollama API
-            ollama_base = base_url.replace("/v1", "").rstrip("/")
-            response = requests.get(f"{ollama_base}/api/tags", timeout=10)
+            # Normalize the URL for Ollama API calls
+            ollama_base = normalize_ollama_url(base_url)
+            response = requests.get(f"{ollama_base}/tags", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 all_models = [model["name"] for model in data.get("models", [])]

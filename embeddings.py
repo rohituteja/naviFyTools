@@ -10,6 +10,7 @@ import requests
 import numpy as np
 import re
 from typing import List, Optional
+from ollama_utils import normalize_ollama_url
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,8 @@ class EmbeddingManager:
         if api_type == "ollama":
             if not base_url:
                 raise ValueError("base_url is required for Ollama")
-            # Remove /v1 suffix if present for Ollama API
-            self.base_url = base_url.replace("/v1", "").rstrip("/")
+            # Normalize Ollama URL for API calls
+            self.base_url = normalize_ollama_url(base_url)
             self.api_key = None
         else:  # openai
             if not api_key:
@@ -172,7 +173,7 @@ class EmbeddingManager:
         # Generate embedding via API
         try:
             if self.api_type == "ollama":
-                url = f"{self.base_url}/api/embeddings"
+                url = f"{self.base_url}/embeddings"
                 payload = {
                     "model": self.model_name,
                     "prompt": text
@@ -262,8 +263,8 @@ class EmbeddingManager:
             
             try:
                 if self.api_type == "ollama":
-                    # Try using the batch-enabled /api/embed endpoint first
-                    url = f"{self.base_url}/api/embed"
+                    # Try using the batch-enabled /embed endpoint first
+                    url = f"{self.base_url}/embed"
                     payload = {
                         "model": self.model_name,
                         "input": batch_texts
