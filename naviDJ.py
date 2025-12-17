@@ -55,7 +55,6 @@ DEFAULT_LLM_MODE = secrets.get("llm", "mode", fallback="openai").lower()
 DEFAULT_LLM_MODEL = secrets.get("llm", "model", fallback=None)
 DEFAULT_OLLAMA_EMBEDDING_MODEL = secrets.get("ollama", "embedding_model", fallback="nomic-embed-text")
 DEFAULT_OPENAI_EMBEDDING_MODEL = secrets.get("openai", "embedding_model", fallback="text-embedding-3-small")
-DEFAULT_OLLAMA_CONTEXT_LENGTH = int(secrets.get("ollama", "context_length", fallback="8192"))
 
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)
 SUBSONIC_AUTH_PARAMS = {
@@ -68,7 +67,6 @@ SUBSONIC_AUTH_PARAMS = {
 # Will be overwritten in `configure_llm` but need a placeholder so _llm_chat can be defined early.
 LLM_MODE: str = DEFAULT_LLM_MODE  # 'openai' | 'ollama'
 LLM_MODEL: str = DEFAULT_LLM_MODEL or ""  # auto‑filled later
-OLLAMA_CONTEXT_LENGTH: int = DEFAULT_OLLAMA_CONTEXT_LENGTH  # context window size for Ollama
 client: OpenAI | None = None  # global client instance
 embedding_mgr = None  # global embedding manager instance (optional)
 
@@ -228,37 +226,19 @@ def _llm_chat(messages: list[dict]) -> str:
     """Universal chat helper that works for both OpenAI & Ollama and always returns clean JSON-only content."""
 
     try:
-        # Build parameters based on LLM mode
-        if LLM_MODE == "ollama":
-            resp = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=messages,
-                stream=False,
-                response_format={"type": "json_object"},
-                extra_body={"num_ctx": OLLAMA_CONTEXT_LENGTH}
-            )
-        else:
-            resp = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=messages,
-                stream=False,
-                response_format={"type": "json_object"}
-            )
+        resp = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            stream=False,
+            response_format={"type": "json_object"}
+        )
     except TypeError:
         # Fallback for older openai‑python that doesn't know `response_format`.
-        if LLM_MODE == "ollama":
-            resp = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=messages,
-                stream=False,
-                extra_body={"num_ctx": OLLAMA_CONTEXT_LENGTH}
-            )
-        else:
-            resp = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=messages,
-                stream=False,
-            )
+        resp = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            stream=False,
+        )
         
         # Extract and log token usage
         if resp.usage:
@@ -913,21 +893,8 @@ def _main_impl(args):
     # We need at least args.min_songs tracks in total → derive a ratio
     required_ratio = args.min_songs / max(1, len(combined_songs))
 
-    # Determine chunk size based on LLM mode and settings
-    if LLM_MODE == "ollama":
-        # Get context length from secrets (default 2048)
-        context_len = int(secrets.get("ollama", "context_length", fallback=4096))
-        
-        # Estimate: ~50 tokens per song entry
-        # Safety margin: aim to use ~90% of total context
-        available_tokens = context_len * 0.9
-        estimated_songs = max(10, int(available_tokens / 50))
-        
-        chunk_size = estimated_songs
-        print(f"Ollama mode: context length {context_len} -> batch size {chunk_size}")
-    else:
-        # OpenAI supports large contexts, set a healthy default
-        chunk_size = 500
+    # Get chunk size from configuration, default to 500
+    chunk_size = int(secrets.get("llm", "chunk_size", fallback=500))
     playlist_items = generate_playlist(
         prompt,
         combined_songs,
