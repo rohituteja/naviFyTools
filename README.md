@@ -150,7 +150,19 @@ When using Ollama or OpenAI as your LLM backend, you can optionally configure an
    [ollama]
    OLLAMA_BASE = http://localhost:11434/v1
    EMBEDDING_MODEL = nomic-embed-text
+   # Optional: Set context window size (default: 8192)
+   CONTEXT_LENGTH = 8192
    ```
+
+**Context Length for Ollama:**
+The `CONTEXT_LENGTH` parameter controls the context window size for Ollama models. A larger context window allows the model to consider more tokens at once when generating responses, which can improve generation speed and prevent truncation. The default is 8192 tokens, but you can adjust this based on your model's capabilities.
+
+**Embedding Cache:**
+Embeddings are cached locally to avoid redundant API calls. The cache is automatically invalidated and regenerated when:
+- The embedding model is changed in configuration
+- The library size increases (new songs/artists/albums are added)
+
+This ensures that embeddings are always up-to-date and retrieval accuracy remains high.
 
 **Setup for OpenAI:**
 1. **Configure in `secrets.txt`** (no need to pull models, they're available via API):

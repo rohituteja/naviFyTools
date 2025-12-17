@@ -33,8 +33,6 @@ class EmbeddingManager:
         if api_type not in {"ollama", "openai"}:
             raise ValueError(f"Unsupported API type: {api_type}. Must be 'ollama' or 'openai'.")
         
-            raise ValueError(f"Unsupported API type: {api_type}. Must be 'ollama' or 'openai'.")
-        
         self.api_type = api_type
         self.model_name = model_name
         
@@ -43,6 +41,10 @@ class EmbeddingManager:
         self.cache_file = f"embeddings_cache_{safe_model_name}.pkl"
         
         self.cache: dict[str, np.ndarray] = {}
+        self.metadata: dict[str, object] = {
+            "model_name": model_name,
+            "library_size": 0
+        }
         
         if api_type == "ollama":
             if not base_url:
@@ -59,15 +61,46 @@ class EmbeddingManager:
         self._load_cache()
     
     def _load_cache(self) -> None:
-        """Load embeddings cache from disk."""
+        """Load embeddings cache from disk with model validation."""
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'rb') as f:
-                    self.cache = pickle.load(f)
-                logger.info(f"Loaded {len(self.cache)} cached embeddings from {self.cache_file}")
+                    cached_data = pickle.load(f)
+                
+                # Handle both old and new cache formats
+                if isinstance(cached_data, dict):
+                    # New format with metadata
+                    if "metadata" in cached_data and "embeddings" in cached_data:
+                        cached_model = cached_data["metadata"].get("model_name")
+                        
+                        # Invalidate cache if model changed
+                        if cached_model != self.model_name:
+                            logger.warning(f"Invalidating cache: embedding model changed from '{cached_model}' to '{self.model_name}'")
+                            self.cache = {}
+                            self.metadata = {
+                                "model_name": self.model_name,
+                                "library_size": 0
+                            }
+                        else:
+                            self.cache = cached_data["embeddings"]
+                            self.metadata = cached_data["metadata"]
+                            logger.info(f"Loaded {len(self.cache)} cached embeddings from {self.cache_file}")
+                    else:
+                        # Old format (direct dict of embeddings)
+                        logger.warning(f"Converting old cache format to new format with metadata")
+                        self.cache = cached_data
+                        self.metadata = {
+                            "model_name": self.model_name,
+                            "library_size": len(cached_data)
+                        }
+                        logger.info(f"Loaded {len(self.cache)} cached embeddings from {self.cache_file}")
             except Exception as e:
                 logger.warning(f"Failed to load cache file {self.cache_file}: {e}. Rebuilding cache.")
                 self.cache = {}
+                self.metadata = {
+                    "model_name": self.model_name,
+                    "library_size": 0
+                }
                 # Delete corrupted cache file
                 try:
                     os.remove(self.cache_file)
@@ -75,14 +108,48 @@ class EmbeddingManager:
                     pass
         else:
             self.cache = {}
+            self.metadata = {
+                "model_name": self.model_name,
+                "library_size": 0
+            }
     
     def _save_cache(self) -> None:
-        """Save embeddings cache to disk."""
+        """Save embeddings cache to disk with metadata."""
         try:
+            cache_data = {
+                "metadata": self.metadata,
+                "embeddings": self.cache
+            }
             with open(self.cache_file, 'wb') as f:
-                pickle.dump(self.cache, f)
+                pickle.dump(cache_data, f)
         except Exception as e:
             logger.warning(f"Failed to save cache to {self.cache_file}: {e}")
+    
+    def check_library_size(self, current_library_size: int) -> None:
+        """
+        Check if library size has increased and invalidate cache if needed.
+        
+        Args:
+            current_library_size: Current number of items in the library
+        """
+        cached_size = self.metadata.get("library_size", 0)
+        
+        if current_library_size > cached_size:
+            logger.warning(f"Invalidating cache: library size increased from {cached_size} to {current_library_size}")
+            # Clear cache but keep some entries that are still valid
+            # This is a trade-off: we could keep old embeddings, but to be safe we regenerate
+            self.cache = {}
+            self.metadata["library_size"] = current_library_size
+            self._save_cache()
+        elif current_library_size < cached_size:
+            # Library shrunk, update metadata but keep cache
+            logger.info(f"Library size decreased from {cached_size} to {current_library_size}, updating metadata")
+            self.metadata["library_size"] = current_library_size
+            self._save_cache()
+        else:
+            # Library size unchanged, just update the metadata count for accuracy
+            self.metadata["library_size"] = current_library_size
+
     
     def get_embedding(self, text: str, force_refresh: bool = False) -> Optional[np.ndarray]:
         """

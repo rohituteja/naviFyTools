@@ -55,6 +55,7 @@ DEFAULT_LLM_MODE = secrets.get("llm", "mode", fallback="openai").lower()
 DEFAULT_LLM_MODEL = secrets.get("llm", "model", fallback=None)
 DEFAULT_OLLAMA_EMBEDDING_MODEL = secrets.get("ollama", "embedding_model", fallback="nomic-embed-text")
 DEFAULT_OPENAI_EMBEDDING_MODEL = secrets.get("openai", "embedding_model", fallback="text-embedding-3-small")
+DEFAULT_OLLAMA_CONTEXT_LENGTH = int(secrets.get("ollama", "context_length", fallback="8192"))
 
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)
 SUBSONIC_AUTH_PARAMS = {
@@ -67,7 +68,7 @@ SUBSONIC_AUTH_PARAMS = {
 # Will be overwritten in `configure_llm` but need a placeholder so _llm_chat can be defined early.
 LLM_MODE: str = DEFAULT_LLM_MODE  # 'openai' | 'ollama'
 LLM_MODEL: str = DEFAULT_LLM_MODEL or ""  # auto‑filled later
-LLM_CONTEXT_LENGTH: int | None = None
+OLLAMA_CONTEXT_LENGTH: int = DEFAULT_OLLAMA_CONTEXT_LENGTH  # context window size for Ollama
 client: OpenAI | None = None  # global client instance
 embedding_mgr = None  # global embedding manager instance (optional)
 
@@ -147,8 +148,6 @@ def configure_llm(mode: str = None, model: str = None) -> None:
         raise ValueError("Unsupported LLM_MODE. Choose 'openai', 'ollama', or 'custom'.")
 
     LLM_MODE = mode
-    global LLM_CONTEXT_LENGTH
-    LLM_CONTEXT_LENGTH = int(secrets.get("ollama", "context_length", fallback=2048)) if mode == "ollama" else None
 
     if mode == "openai":
         LLM_MODEL = model or "gpt-4o-mini"
@@ -232,9 +231,9 @@ def _llm_chat(messages: list[dict]) -> str:
     # Ask for structured JSON output whenever the backend supports it.
     extra_args["response_format"] = {"type": "json_object"}
     
-    # For Ollama, pass the context length option
-    if LLM_MODE == "ollama" and LLM_CONTEXT_LENGTH:
-        extra_args["extra_body"] = {"num_ctx": LLM_CONTEXT_LENGTH}
+    # For Ollama, add context length options to improve generation speed
+    if LLM_MODE == "ollama":
+        extra_args["options"] = {"num_ctx": OLLAMA_CONTEXT_LENGTH}
 
     try:
         resp = client.chat.completions.create(
@@ -252,7 +251,13 @@ def _llm_chat(messages: list[dict]) -> str:
             stream=False,
             **extra_args,
         )
-
+        
+        # Extract and log token usage
+        if resp.usage:
+            logging.info(f"LLM Token Usage - Prompt: {resp.usage.prompt_tokens}, Completion: {resp.usage.completion_tokens}, Total: {resp.usage.total_tokens}")
+        else:
+            logging.info("LLM Token Usage: Not available in response.")
+ 
     # Remove any Ollama <think>...</think> traces *before* returning content.
     content = resp.choices[0].message.content
     return _remove_think_tags(content)
@@ -788,6 +793,12 @@ def _main_impl(args):
     random.shuffle(all_genres)
     all_albums = [a for a in {s.get('album') for s in all_songs if s.get('album')} if isinstance(a, str)]
     random.shuffle(all_albums)
+    
+    # Check if library size has increased and invalidate embedding cache if needed
+    if embedding_mgr is not None:
+        library_size = len(all_artists) + len(all_genres) + len(all_albums)
+        embedding_mgr.check_library_size(library_size)
+
 
     print("Analyzing request...")
     # Extract prompt entities (artists, genres)
