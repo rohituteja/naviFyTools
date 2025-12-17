@@ -173,16 +173,34 @@ class EmbeddingManager:
         
         # Generate embedding via API
         try:
+        # Generate embedding via API
+        try:
             if self.api_type == "ollama":
                 url = f"{self.base_url}/embeddings"
+                headers = {}
+                if self.api_key:
+                    headers["Authorization"] = f"Bearer {self.api_key}"
+                
+                # Try Ollama native format first
                 payload = {
                     "model": self.model_name,
                     "prompt": text
                 }
-                headers = {}
-                # Add Authorization header for Open WebUI if API key is present
-                if self.api_key:
-                    headers["Authorization"] = f"Bearer {self.api_key}"
+                
+                try:
+                    response = requests.post(url, json=payload, headers=headers, timeout=30)
+                    # If 400/422, it might be Open WebUI expecting 'input'
+                    if response.status_code in [400, 422]:
+                        raise requests.exceptions.HTTPError(response=response)
+                    response.raise_for_status()
+                    data = response.json()
+                except Exception:
+                    # Fallback to OpenAI compatible format (Open WebUI)
+                    payload["input"] = payload.pop("prompt")
+                    response = requests.post(url, json=payload, headers=headers, timeout=30)
+                    response.raise_for_status()
+                    data = response.json()
+
             else:  # openai
                 url = f"{self.base_url}/embeddings"
                 payload = {
@@ -193,23 +211,18 @@ class EmbeddingManager:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"
                 }
+                response = requests.post(url, json=payload, headers=headers, timeout=30)
+                response.raise_for_status()
+                data = response.json()
             
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Extract embedding from response (different structure for Ollama vs OpenAI)
-            if self.api_type == "ollama":
-                if "embedding" not in data:
-                    logger.warning(f"Ollama API response missing 'embedding' field: {data}")
-                    return None
+            # Extract embedding from response (handle both Ollama and OpenAI formats)
+            if "embedding" in data:
                 embedding = np.array(data["embedding"], dtype=np.float32)
-            else:  # openai
-                if "data" not in data or not data["data"]:
-                    logger.warning(f"OpenAI API response missing 'data' field: {data}")
-                    return None
-                # OpenAI returns a list with one item containing the embedding
+            elif "data" in data and len(data["data"]) > 0:
                 embedding = np.array(data["data"][0]["embedding"], dtype=np.float32)
+            else:
+                logger.warning(f"API response missing 'embedding' or 'data' field: {data}")
+                return None
             
             # Cache the embedding
             self.cache[text] = embedding
@@ -267,20 +280,20 @@ class EmbeddingManager:
             
             try:
                 if self.api_type == "ollama":
-                    # Try using the batch-enabled /embed endpoint first
+                    # Try using the batch-enabled /embed endpoint first (Native Ollama)
                     url = f"{self.base_url}/embed"
                     payload = {
                         "model": self.model_name,
                         "input": batch_texts
                     }
                     headers = {}
-                    # Add Authorization header for Open WebUI if API key is present
                     if self.api_key:
                         headers["Authorization"] = f"Bearer {self.api_key}"
+                    
                     try:
                         response = requests.post(url, json=payload, headers=headers, timeout=60)
                         
-                        # If 404, the endpoint might not exist (older Ollama), fallback to serial
+                        # If 404, the endpoint might not exist (older Ollama or Open WebUI)
                         if response.status_code == 404:
                             raise NotImplementedError("Ollama /api/embed not found")
                         
@@ -292,13 +305,36 @@ class EmbeddingManager:
                             embedding = np.array(embedding_data, dtype=np.float32)
                             self.cache[batch_texts[j]] = embedding
                             results[batch_indices[j]] = embedding
-                            
+
                     except (requests.exceptions.RequestException, NotImplementedError):
-                        # Fallback to serial processing for older Ollama or errors
-                        logger.info("Batch embedding failed or not supported by Ollama version, falling back to serial.")
-                        for j, text in enumerate(batch_texts):
-                            embedding = self.get_embedding(text, force_refresh=True)
-                            results[batch_indices[j]] = embedding
+                        # Attempt Open WebUI / OpenAI compatible batch endpoint
+                        try:
+                            url = f"{self.base_url}/embeddings"
+                            # OpenAI style payload uses 'input' for batch
+                            payload = {
+                                "model": self.model_name,
+                                "input": batch_texts
+                            }
+                            response = requests.post(url, json=payload, headers=headers, timeout=60)
+                            response.raise_for_status()
+                            data = response.json()
+                            
+                            if "data" in data:
+                                for item in data["data"]:
+                                    idx = item["index"]
+                                    if 0 <= idx < len(batch_texts):
+                                        embedding = np.array(item["embedding"], dtype=np.float32)
+                                        self.cache[batch_texts[idx]] = embedding
+                                        results[batch_indices[idx]] = embedding
+                            else:
+                                raise Exception("Missing 'data' field in batch response")
+                                
+                        except Exception:
+                            # Fallback to serial processing
+                            logger.info("Batch embedding failed for both /embed and /embeddings, falling back to serial.")
+                            for j, text in enumerate(batch_texts):
+                                embedding = self.get_embedding(text, force_refresh=True)
+                                results[batch_indices[j]] = embedding
 
                 else:  # openai
                     url = f"{self.base_url}/embeddings"

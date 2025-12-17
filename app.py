@@ -117,18 +117,37 @@ def get_available_models(api_type, api_key=None, base_url=None):
         elif api_type == "ollama":
             if not base_url:
                 return {"error": "Ollama base URL required"}
-            # Normalize the URL for Ollama API calls
             ollama_base = normalize_ollama_url(base_url)
             headers = {}
-            # Add Authorization header for Open WebUI if API key is present
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-            response = requests.get(f"{ollama_base}/tags", headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                return [model["name"] for model in data.get("models", [])]
-            else:
-                return {"error": f"Failed to fetch models: {response.status_code}"}
+            
+            # Try /tags first (Ollama native)
+            try:
+                response = requests.get(f"{ollama_base}/tags", headers=headers, timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    return [model["name"] for model in data.get("models", [])]
+            except Exception:
+                pass
+                
+            # Try /models as fallback (Open WebUI / OpenAI compatible)
+            try:
+                response = requests.get(f"{ollama_base}/models", headers=headers, timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    # OpenAI format is usually a list under 'data'
+                    if isinstance(data, dict) and "data" in data:
+                        return [model["id"] for model in data["data"]]
+                    # Open WebUI fallback format
+                    elif isinstance(data, dict) and "models" in data:
+                        return [model["name"] for model in data.get("models", [])]
+                    elif isinstance(data, list):
+                        return [model.get("id") or model.get("name") for model in data]
+            except Exception as e:
+                return {"error": f"Failed to fetch models from both /tags and /models: {str(e)}"}
+                
+            return {"error": f"Failed to fetch models. Status code: {response.status_code if 'response' in locals() else 'Unknown'}"}
         elif api_type == "custom":
             if not base_url or not api_key:
                 return {"error": "Custom API base URL and API key required"}
@@ -291,16 +310,40 @@ def get_embedding_models(api_type):
             headers = {}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-                
-            response = requests.get(f"{ollama_base}/tags", headers=headers, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                all_models = [model["name"] for model in data.get("models", [])]
-                # Filter for models containing "embed" in the name
-                embedding_models = [model for model in all_models if "embed" in model.lower()]
-                return jsonify(embedding_models)
-            else:
-                return jsonify({"error": f"Failed to fetch models: {response.status_code}"})
+            
+            all_models = []
+            
+            # Try /tags first (Ollama native)
+            try:
+                response = requests.get(f"{ollama_base}/tags", headers=headers, timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    all_models = [model["name"] for model in data.get("models", [])]
+            except Exception:
+                pass
+            
+            # Try /models if no models found yet
+            if not all_models:
+                try:
+                    response = requests.get(f"{ollama_base}/models", headers=headers, timeout=5)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if isinstance(data, dict) and "data" in data:
+                            all_models = [model["id"] for model in data["data"]]
+                        elif isinstance(data, dict) and "models" in data:
+                            all_models = [model["name"] for model in data.get("models", [])]
+                        elif isinstance(data, list):
+                            all_models = [model.get("id") or model.get("name") for model in data]
+                except Exception:
+                    pass
+            
+            if not all_models:
+                return jsonify({"error": "Failed to fetch models from both /tags and /models"})
+            
+            # Filter for models containing "embed" in the name
+            embedding_models = [model for model in all_models if "embed" in model.lower()]
+            return jsonify(embedding_models)
+            
         except Exception as e:
             return jsonify({"error": f"Error fetching embedding models: {str(e)}"})
     
