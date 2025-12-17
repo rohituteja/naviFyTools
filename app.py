@@ -119,7 +119,11 @@ def get_available_models(api_type, api_key=None, base_url=None):
                 return {"error": "Ollama base URL required"}
             # Normalize the URL for Ollama API calls
             ollama_base = normalize_ollama_url(base_url)
-            response = requests.get(f"{ollama_base}/tags")
+            headers = {}
+            # Add Authorization header for Open WebUI if API key is present
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            response = requests.get(f"{ollama_base}/tags", headers=headers)
             if response.status_code == 200:
                 data = response.json()
                 return [model["name"] for model in data.get("models", [])]
@@ -261,7 +265,8 @@ def get_models(api_type):
         return jsonify(get_available_models("openai", api_key=api_key))
     elif api_type == "ollama":
         base_url = secrets.get("ollama", "ollama_base", fallback=None)
-        return jsonify(get_available_models("ollama", base_url=base_url))
+        api_key = secrets.get("ollama", "api_key", fallback=None)
+        return jsonify(get_available_models("ollama", api_key=api_key, base_url=base_url))
     elif api_type == "custom":
         api_key = secrets.get("custom", "api_key", fallback=None)
         base_url = secrets.get("custom", "base_url", fallback=None)
@@ -282,7 +287,12 @@ def get_embedding_models(api_type):
         try:
             # Normalize the URL for Ollama API calls
             ollama_base = normalize_ollama_url(base_url)
-            response = requests.get(f"{ollama_base}/tags", timeout=10)
+            api_key = secrets.get("ollama", "api_key", fallback=None)
+            headers = {}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+                
+            response = requests.get(f"{ollama_base}/tags", headers=headers, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 all_models = [model["name"] for model in data.get("models", [])]

@@ -160,7 +160,7 @@ def configure_llm(mode: str = None, model: str = None) -> None:
         client = OpenAI(api_key=DEFAULT_OLLAMA_API_KEY, base_url=DEFAULT_OLLAMA_BASE)
         # Initialize embedding manager for Ollama
         if DEFAULT_OLLAMA_BASE:
-            configure_embeddings("ollama", DEFAULT_OLLAMA_EMBEDDING_MODEL, base_url=DEFAULT_OLLAMA_BASE)
+            configure_embeddings("ollama", DEFAULT_OLLAMA_EMBEDDING_MODEL, base_url=DEFAULT_OLLAMA_BASE, api_key=DEFAULT_OLLAMA_API_KEY)
     else:  # custom
         LLM_MODEL = model or "gpt-4o-mini"
         client = OpenAI(api_key=DEFAULT_CUSTOM_API_KEY, base_url=DEFAULT_CUSTOM_BASE_URL)
