@@ -173,8 +173,6 @@ class EmbeddingManager:
         
         # Generate embedding via API
         try:
-        # Generate embedding via API
-        try:
             if self.api_type == "ollama":
                 url = f"{self.base_url}/embeddings"
                 headers = {}
