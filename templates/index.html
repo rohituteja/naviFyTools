@@ -98,6 +98,14 @@
                                     value="{{ config.get('ollama', 'ollama_base', fallback='') }}" data-section="ollama"
                                     data-key="ollama_base" placeholder="http://localhost:11434/v1">
                             </div>
+                            <div class="mb-3">
+                                <label class="form-label">Ollama API Key (Optional)</label>
+                                <input type="password" class="form-control" name="ollama.api_key"
+                                    value="{{ config.get('ollama', 'api_key', fallback='') }}" data-section="ollama"
+                                    data-key="api_key" placeholder="Leave blank for local instances">
+                                <small class="form-text text-muted">Only required for Ollama instances with
+                                    authentication enabled</small>
+                            </div>
                         </div>
 
                         <div id="customConfig" class="config-section mb-2" style="display: none;">

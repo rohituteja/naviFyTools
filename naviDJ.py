@@ -48,6 +48,7 @@ secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 
 DEFAULT_OPENAI_KEY = secrets.get("openai", "openai_key", fallback=None)
 DEFAULT_OLLAMA_BASE = secrets.get("ollama", "ollama_base", fallback=None)
+DEFAULT_OLLAMA_API_KEY = secrets.get("ollama", "api_key", fallback=None) or "ollama"
 DEFAULT_CUSTOM_API_KEY = secrets.get("custom", "api_key", fallback=None)
 DEFAULT_CUSTOM_BASE_URL = secrets.get("custom", "base_url", fallback=None)
 
@@ -155,8 +156,8 @@ def configure_llm(mode: str = None, model: str = None) -> None:
             configure_embeddings("openai", DEFAULT_OPENAI_EMBEDDING_MODEL, api_key=DEFAULT_OPENAI_KEY)
     elif mode == "ollama":
         LLM_MODEL = model or "gemma3n:latest"  # e.g. 'llama3' or 'mistral-7b-instruct'
-        # Ollama's shim at /v1 is OpenAI‑compatible; any string works as the key.
-        client = OpenAI(api_key="ollama", base_url=DEFAULT_OLLAMA_BASE)
+        # Ollama's shim at /v1 is OpenAI‑compatible
+        client = OpenAI(api_key=DEFAULT_OLLAMA_API_KEY, base_url=DEFAULT_OLLAMA_BASE)
         # Initialize embedding manager for Ollama
         if DEFAULT_OLLAMA_BASE:
             configure_embeddings("ollama", DEFAULT_OLLAMA_EMBEDDING_MODEL, base_url=DEFAULT_OLLAMA_BASE)
