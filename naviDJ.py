@@ -304,13 +304,14 @@ def _llm_select_items(prompt: str, items: list[str], n: int, label: str) -> list
 def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[str]:
     """
     Select top n items using LLM, with optional embedding-based pre-filtering.
-    If embedding_mgr is available and items list has >200 items, pre-filter to top 200
-    using embeddings before sending to LLM. Otherwise, use LLM directly on all items.
+    If embedding_mgr is available, pre-filter to 35% of original size using embeddings
+    before sending to LLM. Otherwise, use LLM directly on all items.
     """
-    # Pre-filter with embeddings if available and list is large
-    if embedding_mgr is not None and len(items) > 200:
+    # Pre-filter with embeddings if available
+    if embedding_mgr is not None and len(items) > 0:
         try:
-            pre_filtered = embedding_mgr.find_similar(prompt, items, top_k=200)
+            top_k = max(1, int(len(items) * 0.35))
+            pre_filtered = embedding_mgr.find_similar(prompt, items, top_k=top_k)
             if pre_filtered:
                 print(f"[INFO] Pre-filtered {len(items)} {label} to {len(pre_filtered)} using embeddings")
                 return _llm_select_items(prompt, pre_filtered, n, label)
@@ -342,7 +343,7 @@ def generate_playlist(
 ) -> list[dict]:
     """
     Generate playlist using LLM, with optional embedding-based pre-filtering.
-    If embedding_mgr is available, pre-filter songs to ~60% of original size using embeddings
+    If embedding_mgr is available, pre-filter songs to 50% of original size using embeddings
     before chunking and processing. Returns JSON-only; caller can safely json.loads() the result.
     """
     # Pre-filter with embeddings if available
@@ -360,8 +361,8 @@ def generate_playlist(
                     text += f" - {genre}"
                 song_texts.append(text)
             
-            # Pre-filter to ~60% of original size, but capped at 400 items to keep LLM workload reasonable
-            target_size = min(len(songs), 400)
+            # Pre-filter to 50% of original size to keep LLM workload reasonable
+            target_size = max(1, int(len(songs) * 0.50))
             if len(songs) > target_size:
                 similar_indices = embedding_mgr.find_similar_indices(prompt, song_texts, top_k=target_size)
                 if similar_indices:
@@ -701,15 +702,16 @@ def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: lis
 def select_relevant_albums_llm(prompt: str, all_albums: list[str], n: int = 5) -> list[str]:
     """
     Use the LLM to select up to n relevant albums from all_albums for the given prompt.
-    If embedding_mgr is available and album list has >50 items, pre-filter to 50 using embeddings.
+    If embedding_mgr is available, pre-filter to 35% using embeddings.
     The LLM must return a JSON object: {"albums": [ ... ]} (never a list or dict with other keys).
     Only albums in all_albums are valid. If the response is not valid, return [].
     """
-    # Pre-filter with embeddings if available and list is large
+    # Pre-filter with embeddings if available
     albums_to_use = all_albums
-    if embedding_mgr is not None and len(all_albums) > 50:
+    if embedding_mgr is not None and len(all_albums) > 0:
         try:
-            pre_filtered = embedding_mgr.find_similar(prompt, all_albums, top_k=50)
+            top_k = max(1, int(len(all_albums) * 0.35))
+            pre_filtered = embedding_mgr.find_similar(prompt, all_albums, top_k=top_k)
             if pre_filtered:
                 print(f"[INFO] Pre-filtered {len(all_albums)} albums to {len(pre_filtered)} using embeddings")
                 albums_to_use = pre_filtered
@@ -798,7 +800,7 @@ def _main_impl(args):
 
     print("Connsidering albums...")
     # Use LLM to select up to 5 relevant albums
-    relevant_albums = select_relevant_albums_llm(prompt, all_albums, n=5)
+    relevant_albums = select_relevant_albums_llm(prompt, all_albums, n=7)
     album_artists = []
     album_genres = []
     if relevant_albums:
@@ -840,25 +842,22 @@ def _main_impl(args):
         context_genres = list(dict.fromkeys(context_genres))
 
     # Continue as before, but use album_filtered_songs for focus selection
-    num_artists: int = 30
-    num_genres:  int = 50
+    num_artists: int = 20
+    num_genres:  int = 40
 
     print("Choosing top artists and genres...")
     init_focus_artists = select_top_items(prompt, all_artists, num_artists, "artists")
     init_focus_genres  = select_top_items(prompt, all_genres, num_genres, "genres")
 
     # Combine context, prompt, and LLM-selected for focus
-    combined_artists = list(dict.fromkeys(
+    focus_artists = list(dict.fromkeys(
         explicit_prompt_artists + album_artists + context_artists + init_focus_artists
     ))
-    combined_genres = list(dict.fromkeys(
-        explicit_prompt_genres + album_genres + context_genres + init_focus_genres 
-    ))
-
-    focus_artists = select_top_items(prompt, combined_artists, num_artists, "artists")
     print("Focus artists:", ", ".join(focus_artists))
     
-    focus_genres = select_top_items(prompt, combined_genres, num_genres, "genres")
+    focus_genres = list(dict.fromkeys(
+        explicit_prompt_genres + album_genres + context_genres + init_focus_genres 
+    ))
     print("Focus genres: ", ", ".join(focus_genres))
 
     # Filter library based on focus
