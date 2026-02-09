@@ -967,7 +967,7 @@ def _main_impl(args):
 
     # ========== STAGE 3: PLAYLIST GENERATION ==========
     start_t = time.time()
-    print(f"Generating playlist... ({time.time()-start_t:.1f}s)")
+    print(f"Generating playlist...")
     playlist_items = generate_playlist_chunked(
         prompt=prompt,
         filtered_songs=candidate_pool,
