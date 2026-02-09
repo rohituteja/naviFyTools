@@ -54,6 +54,7 @@ DEFAULT_CUSTOM_BASE_URL = secrets.get("custom", "base_url", fallback=None)
 
 DEFAULT_LLM_MODE = secrets.get("llm", "mode", fallback="openai").lower()
 DEFAULT_LLM_MODEL = secrets.get("llm", "model", fallback=None)
+DEFAULT_CHUNK_SIZE = int(secrets.get("llm", "chunk_size", fallback="200"))
 
 
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)
@@ -1000,7 +1001,7 @@ if __name__ == "__main__":
     parser.add_argument("--playlist_name", type=str, default="naviDJ", help="Name of the playlist to create or update.")
     parser.add_argument("--prompt", type=str, help="Vibe prompt for the playlist.")
     parser.add_argument("--min_songs", type=int, default=35, help="Minimum number of songs in the playlist.")
-    parser.add_argument("--chunk_size", type=int, default=200, help="Number of songs per LLM chunk (adjust based on context size).")
+    parser.add_argument("--chunk_size", type=int, default=DEFAULT_CHUNK_SIZE, help="Number of songs per LLM chunk (adjust based on context size).")
     parser.add_argument("--llm_mode", type=str, choices=["openai", "ollama"], default=DEFAULT_LLM_MODE, help="Which LLM backend to use (overrides secrets.txt).")
     parser.add_argument("--llm_model", type=str, default=DEFAULT_LLM_MODEL, help="Which LLM model to use (overrides secrets.txt).")
     args = parser.parse_args()
