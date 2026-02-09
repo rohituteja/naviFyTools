@@ -211,6 +211,8 @@ def run_dj():
                 args += ['--prompt', str(data.get('prompt'))]
             if data.get('min_songs'):
                 args += ['--min_songs', str(data.get('min_songs'))]
+            if data.get('chunk_size'):
+                args += ['--chunk_size', str(data.get('chunk_size'))]
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             if process.stdout:
                 while True:

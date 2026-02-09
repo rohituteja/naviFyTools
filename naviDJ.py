@@ -2,8 +2,9 @@
 AI-powered playlist generator for Subsonic/Navidrome music servers.
 
 - Uses OpenAI or Ollama LLMs to generate playlists based on a vibe prompt.
-- Prioritizes artists/genres from prompt and context playlists.
-- Pushes generated playlists to the server.
+- Selects relevant artists/albums/genres from library using LLM.
+- Filters library using metadata-based weighted scoring.
+- Generates final playlist via LLM from filtered candidates.
 
 Usage:
     python naviDJ.py [--playlist_name NAME] [--prompt PROMPT] [--min_songs N] [--llm_mode openai|ollama]
@@ -24,6 +25,8 @@ import xml.etree.ElementTree as ET
 import json
 import random
 import re
+import time
+
 from tqdm import tqdm
 from openai import OpenAI
 import argparse
@@ -31,12 +34,9 @@ from typing import List, Dict  # optional, only for type hints
 import configparser
 from rapidfuzz import fuzz
 import logging
+from embeddings import EmbeddingManager
 
-# Import embedding manager (optional dependency)
-try:
-    from embeddings import EmbeddingManager
-except ImportError:
-    EmbeddingManager = None
+
 
 # --------------------------------------------------
 # CONFIG & LLM CLIENT SETUP
@@ -54,8 +54,7 @@ DEFAULT_CUSTOM_BASE_URL = secrets.get("custom", "base_url", fallback=None)
 
 DEFAULT_LLM_MODE = secrets.get("llm", "mode", fallback="openai").lower()
 DEFAULT_LLM_MODEL = secrets.get("llm", "model", fallback=None)
-DEFAULT_OLLAMA_EMBEDDING_MODEL = secrets.get("ollama", "embedding_model", fallback="nomic-embed-text")
-DEFAULT_OPENAI_EMBEDDING_MODEL = secrets.get("openai", "embedding_model", fallback="text-embedding-3-small")
+
 
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)
 SUBSONIC_AUTH_PARAMS = {
@@ -67,9 +66,10 @@ SUBSONIC_AUTH_PARAMS = {
 
 # Will be overwritten in `configure_llm` but need a placeholder so _llm_chat can be defined early.
 LLM_MODE: str = DEFAULT_LLM_MODE  # 'openai' | 'ollama'
-LLM_MODEL: str = DEFAULT_LLM_MODEL or ""  # auto‑filled later
+LLM_MODEL: str = DEFAULT_LLM_MODEL or ""  # auto-filled later
 client: OpenAI | None = None  # global client instance
-embedding_mgr = None  # global embedding manager instance (optional)
+EMBEDDING_MODEL: str | None = None
+embedding_manager: EmbeddingManager | None = None
 
 # --------------------------------------------------
 # HELPER FOR CLEANING LLM OUTPUT
@@ -81,17 +81,18 @@ def _remove_think_tags(text: str) -> str:
     """Strip <think>...</think> blocks (Ollama 'thinking' traces) and trim whitespace."""
     return _THINK_RE.sub("", text).strip()
 
+
 def _split_artist_string(artist_string: str) -> list[str]:
     """
     Split a complex artist string into individual artist names.
-    Handles various delimiters: ",", "•", ";", "feat.", "featuring", etc.
+    Handles various delimiters: ",", ".", ";", "feat.", "featuring", etc.
     Returns a list of cleaned individual artist names.
     """
     if not artist_string:
         return []
     
     # Normalize common delimiters
-    normalized = artist_string.replace("•", ",").replace(";", ",").replace("feat.", ",").replace("featuring", ",")
+    normalized = artist_string.replace(",", ",").replace(";", ",").replace("feat.", ",").replace("featuring", ",")
     
     # Split by comma and clean each part
     artists = []
@@ -102,46 +103,15 @@ def _split_artist_string(artist_string: str) -> list[str]:
     
     return artists
 
-# --------------------------------------------------
-# LLM CLIENT INITIALISATION
-# --------------------------------------------------
-
-def configure_embeddings(api_type: str, model_name: str, base_url: str = None, api_key: str = None) -> None:
-    """
-    Initialize the global embedding manager.
-    
-    Args:
-        api_type: Type of API to use ("ollama" or "openai")
-        model_name: Name of the embedding model
-        base_url: Base URL for Ollama or OpenAI (optional for OpenAI, defaults to https://api.openai.com/v1)
-        api_key: API key for OpenAI (required for OpenAI, not used for Ollama)
-    """
-    global embedding_mgr
-    
-    if EmbeddingManager is None:
-        logging.warning("EmbeddingManager not available. Install required dependencies to use embeddings.")
-        embedding_mgr = None
-        return
-    
-    try:
-        embedding_mgr = EmbeddingManager(
-            api_type=api_type,
-            model_name=model_name,
-            base_url=base_url,
-            api_key=api_key
-        )
-        logging.info(f"Embedding manager initialized with {api_type} model: {model_name}")
-    except Exception as e:
-        logging.warning(f"Failed to initialize embedding manager: {e}. Continuing without embeddings.")
-        embedding_mgr = None
-
 def configure_llm(mode: str = None, model: str = None) -> None:
     """Initialise the global `client`, `LLM_MODE`, and `LLM_MODEL` based on *mode* and *model*."""
-    global LLM_MODE, LLM_MODEL, client, embedding_mgr
+    global LLM_MODE, LLM_MODEL, client, EMBEDDING_MODEL, embedding_manager
 
     # Use secrets.txt defaults if not provided
     mode = (mode or DEFAULT_LLM_MODE or "openai").lower()
-    model = model or DEFAULT_LLM_MODEL or "gpt-4o-mini"
+    
+    # Reload secrets to get latest config (important for frontend updates)
+    secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 
     if mode not in {"openai", "ollama", "custom"}:
         raise ValueError("Unsupported LLM_MODE. Choose 'openai', 'ollama', or 'custom'.")
@@ -149,22 +119,28 @@ def configure_llm(mode: str = None, model: str = None) -> None:
     LLM_MODE = mode
 
     if mode == "openai":
-        LLM_MODEL = model or "gpt-4o-mini"
+        LLM_MODEL = model or DEFAULT_LLM_MODEL or "gpt-4o-mini"
+        EMBEDDING_MODEL = secrets.get("openai", "embedding_model", fallback="text-embedding-3-small")
         client = OpenAI(api_key=DEFAULT_OPENAI_KEY)
-        # Initialize embedding manager for OpenAI
-        if DEFAULT_OPENAI_KEY:
-            configure_embeddings("openai", DEFAULT_OPENAI_EMBEDDING_MODEL, api_key=DEFAULT_OPENAI_KEY)
+        embedding_manager = EmbeddingManager(
+            api_type="openai",
+            model_name=EMBEDDING_MODEL,
+            api_key=DEFAULT_OPENAI_KEY
+        )
     elif mode == "ollama":
-        LLM_MODEL = model or "gemma3n:latest"  # e.g. 'llama3' or 'mistral-7b-instruct'
-        # Ollama's shim at /v1 is OpenAI‑compatible
+        LLM_MODEL = model or DEFAULT_LLM_MODEL or "gemma3n:latest" 
+        EMBEDDING_MODEL = secrets.get("ollama", "embedding_model", fallback="nomic-embed-text:latest")
         client = OpenAI(api_key=DEFAULT_OLLAMA_API_KEY, base_url=DEFAULT_OLLAMA_BASE)
-        # Initialize embedding manager for Ollama
-        if DEFAULT_OLLAMA_BASE:
-            configure_embeddings("ollama", DEFAULT_OLLAMA_EMBEDDING_MODEL, base_url=DEFAULT_OLLAMA_BASE, api_key=DEFAULT_OLLAMA_API_KEY)
+        embedding_manager = EmbeddingManager(
+            api_type="ollama",
+            model_name=EMBEDDING_MODEL,
+            base_url=DEFAULT_OLLAMA_BASE,
+            api_key=DEFAULT_OLLAMA_API_KEY
+        )
     else:  # custom
-        LLM_MODEL = model or "gpt-4o-mini"
+        LLM_MODEL = model or DEFAULT_LLM_MODEL or "gpt-4o-mini"
         client = OpenAI(api_key=DEFAULT_CUSTOM_API_KEY, base_url=DEFAULT_CUSTOM_BASE_URL)
-        embedding_mgr = None  # Embeddings not supported with custom API
+        embedding_manager = None
 
 # --------------------------------------------------
 # SUBSONIC HELPERS
@@ -182,7 +158,7 @@ def fetch_starred_ids() -> set[str]:
 def fetch_all_subsonic_songs() -> list[dict]:
     all_songs: list[dict] = []
     song_offset, song_count = 0, 500
-    bar = tqdm(desc="Fetching songs", unit="song", dynamic_ncols=True)
+    bar = tqdm(desc="Fetching songs", unit="song", dynamic_ncols=True, ascii=True)
 
     while True:
         resp = requests.get(
@@ -217,10 +193,11 @@ def fetch_all_subsonic_songs() -> list[dict]:
             break
         song_offset += song_count
     bar.close()
+    print()  # Ensure newline after progress bar
     return all_songs
 
 # --------------------------------------------------
-# LLM UTILITIES  –  artist & genre selection
+# LLM UTILITIES - artist and genre selection
 # --------------------------------------------------
 
 def _llm_chat(messages: list[dict]) -> str:
@@ -233,24 +210,24 @@ def _llm_chat(messages: list[dict]) -> str:
             stream=False,
             response_format={"type": "json_object"}
         )
-    except TypeError:
-        # Fallback for older openai‑python that doesn't know `response_format`.
+    except Exception:
+        # Fallback for older openai-python or backends that don't know `response_format`.
         resp = client.chat.completions.create(
             model=LLM_MODEL,
             messages=messages,
             stream=False,
         )
         
-        # Extract and log token usage
-        if resp.usage:
-            logging.info(f"LLM Token Usage - Prompt: {resp.usage.prompt_tokens}, Completion: {resp.usage.completion_tokens}, Total: {resp.usage.total_tokens}")
-        else:
-            logging.info("LLM Token Usage: Not available in response.")
-
- 
-    # Remove any Ollama <think>...</think> traces *before* returning content.
     content = resp.choices[0].message.content
-    return _remove_think_tags(content)
+    content = _remove_think_tags(content)
+    
+    # Robustly find the JSON object if it's buried in text
+    if "{" in content and "}" in content:
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        content = content[start:end]
+        
+    return content
 
 
 def _strip_fences(text: str) -> str:
@@ -263,179 +240,312 @@ def _strip_fences(text: str) -> str:
     return text
 
 
-def _llm_select_items(prompt: str, items: list[str], n: int, label: str) -> list[str]:
-    """Internal function that performs LLM-based selection. Returns JSON-only; caller can safely json.loads() the result."""
+def _clean_json(text: str) -> str:
+    """Attempt to fix common JSON errors from LLMs (trailing commas, etc)."""
+    # Remove trailing commas before closing braces/brackets
+    text = re.sub(r',\s*([\]}])', r'\1', text)
+    return text
+
+
+def select_focus_metadata_single_call(
+    prompt: str,
+    all_artists: list[str],
+    all_genres: list[str],
+    all_albums: list[str]
+) -> dict[str, list[str]]:
+    """
+    Single LLM call to select relevant artists, genres, and albums together.
+    """
     system_msg = {
         "role": "system",
         "content": (
-            f"You are a music‑curation assistant. Given a vibe prompt and a list of {label}, "
-            f"return exactly {n} {label} from the list that best fit the vibe, as a JSON array of strings.\n"
-            f"You MUST ONLY select from the provided list. Do NOT invent or return any item not in the list.\n"
-            f"If the prompt specifically mentions anything/anyone in the list, be SURE to include it, "
-            f"but do not include ANY items that are not in the list. If it makes sense to terminate the "
-            f"list before hitting {n} objects, do so.\n"
-            f"If nothing matches, return an empty list.\n"
-            f"Consider the whole list first and the vibe and then make your decisions.\n"
-            f"Return **only** a JSON array of strings. No objects, keys, or comments."
+            "You are a music metadata curator. Your task is to select focused metadata items for a given vibe prompt.\n"
+            "You MUST select items EXACTLY as they appear in the provided lists. Do NOT modify capitalization, spelling, or formatting.\n"
+            "Return ONLY items that exist in the library.\n\n"
+            "Selection targets:\n"
+            "- Artists: Exactly 5 artists that fit the vibe\n"
+            "- Genres: Exactly 10 relevant genres\n"
+            "- Albums: Exactly 5 representative albums\n\n"
+            "Return ONLY valid JSON in this exact format:\n"
+            '{\n'
+            '  "artists": ["artist1", "artist2", ...],\n'
+            '  "genres": ["genre1", "genre2", ...],\n'
+            '  "albums": ["album1", "album2", ...]\n'
+            '}\n\n'
+            "Rules:\n"
+            "- ONLY select from the provided lists. Do NOT invent new items.\n"
+            "- Use the EXACT string representation.\n"
+            "- If the prompt explicitly mentions an item, ALWAYS include it if it exists."
         ),
     }
+    
     user_msg = {
         "role": "user",
         "content": (
-            f"Vibe prompt: \"{prompt}\"\n\nAvailable {label} ({len(items)}): {items}\n\n"
-            f"Respond with **ONLY** a JSON array of {n} strings (no extra keys, no prose)."
+            f'Vibe prompt: "{prompt}"\n\n'
+            f"Available artists ({len(all_artists)}): {all_artists}\n"
+            f"Available genres ({len(all_genres)}): {all_genres}\n"
+            f"Available albums ({len(all_albums)}): {all_albums}\n"
         ),
     }
-    raw = _strip_fences(_llm_chat([system_msg, user_msg]))
-    try:
-        arr = json.loads(raw)
-        if isinstance(arr, list):
-            # Only return items that are actually in the provided list
-            valid = [x for x in arr if x in items]
-            dropped = [x for x in arr if x not in items]
-            if dropped:
-                print(f"[WARN] LLM returned {len(dropped)} invalid {label}: {dropped}")
-            return valid[:n]
-    except Exception:
-        pass
-    return items[:n]
-
-
-def select_top_items(prompt: str, items: list[str], n: int, label: str) -> list[str]:
-    """
-    Select top n items using LLM, with optional embedding-based pre-filtering.
-    If embedding_mgr is available, pre-filter to 35% of original size using embeddings
-    before sending to LLM. Otherwise, use LLM directly on all items.
-    """
-    # Pre-filter with embeddings if available
-    if embedding_mgr is not None and len(items) > 0:
-        try:
-            top_k = max(1, int(len(items) * 0.35))
-            pre_filtered = embedding_mgr.find_similar(prompt, items, top_k=top_k)
-            if pre_filtered:
-                print(f"[INFO] Pre-filtered {len(items)} {label} to {len(pre_filtered)} using embeddings")
-                return _llm_select_items(prompt, pre_filtered, n, label)
-            else:
-                # Fallback if embedding filtering failed
-                logging.warning("Embedding pre-filtering returned empty, using all items")
-        except Exception as e:
-            logging.warning(f"Embedding pre-filtering failed: {e}. Using all items.")
     
-    # Use LLM directly (either no embeddings available, or list is small)
-    return _llm_select_items(prompt, items, n, label)
+    raw = _llm_chat([system_msg, user_msg])
+    raw = _clean_json(_strip_fences(raw))
+    
+    try:
+        parsed = json.loads(raw)
+        result = {
+            "artists": [x for x in parsed.get("artists", []) if x in all_artists],
+            "genres": [x for x in parsed.get("genres", []) if x in all_genres],
+            "albums": [x for x in parsed.get("albums", []) if x in all_albums]
+        }
+        
+        return result
+    except Exception as e:
+        print(f"[ERROR] Metadata selection failed: {e}")
+        return {"artists": all_artists[:10], "genres": all_genres[:15], "albums": all_albums[:5]}
 
-# --------------------------------------------------
-# PLAYLIST GENERATION
-# --------------------------------------------------
-
-def chunk_list(lst, size):
-    for i in range(0, len(lst), size):
-        yield lst[i : i + size]
-
-
-def generate_playlist(
-    prompt: str,
-    songs: list[dict],
-    *,
-    chunk_size: int,
-    required_ratio: float,
-    existing_playlists: list[dict] = [],
+def filter_library_by_metadata(
+    explicit_artists: list[str],
+    explicit_genres: list[str],
+    explicit_albums: list[str],
+    context_artists: list[str],
+    context_genres: list[str],
+    context_albums: list[str],
+    selected_artists: list[str],
+    selected_genres: list[str],
+    selected_albums: list[str],
+    all_songs: list[dict],
+    context_song_ids: set[str] = None,
+    semantic_song_ids: set[str] = None
 ) -> list[dict]:
     """
-    Generate playlist using LLM, with optional embedding-based pre-filtering.
-    If embedding_mgr is available, pre-filter songs to 50% of original size using embeddings
-    before chunking and processing. Returns JSON-only; caller can safely json.loads() the result.
+    Filter library based on combined focus items with hierarchical weighting.
     """
-    # Pre-filter with embeddings if available
-    songs_to_use = songs
-    if embedding_mgr is not None:
-        try:
-            # Create text representations: "song title by artist name - genre"
-            song_texts = []
-            for song in songs:
-                title = song.get("title", "")
-                artist = song.get("artist", "")
-                genre = song.get("genre", "")
-                text = f"{title} by {artist}"
-                if genre:
-                    text += f" - {genre}"
-                song_texts.append(text)
-            
-            # Pre-filter to 50% of original size to keep LLM workload reasonable
-            target_size = max(1, int(len(songs) * 0.50))
-            if len(songs) > target_size:
-                similar_indices = embedding_mgr.find_similar_indices(prompt, song_texts, top_k=target_size)
-                if similar_indices:
-                    songs_to_use = [songs[i] for i in similar_indices]
-                    print(f"[INFO] Pre-filtered {len(songs)} songs to {len(songs_to_use)} using embeddings")
-                else:
-                    logging.warning("Embedding pre-filtering returned empty, using all songs")
-        except Exception as e:
-            logging.warning(f"Embedding pre-filtering failed: {e}. Using all songs.")
+    # Create sets for efficient lookup
+    exp_a = set(explicit_artists)
+    exp_g = set(explicit_genres)
+    exp_al = set(explicit_albums)
     
-    playlist = []
-    bar = tqdm(total=len(songs_to_use), desc="Building playlist", unit="song", dynamic_ncols=True)
+    ctx_a = set(context_artists)
+    ctx_g = set(context_genres)
+    ctx_al = set(context_albums)
+    ctx_ids = context_song_ids or set()
+    
+    sel_a = set(selected_artists)
+    sel_g = set(selected_genres)
+    sel_al = set(selected_albums)
+    
+    sem_ids = semantic_song_ids or set()
+    
+    filtered = []
+    for s in all_songs:
+        song_artists = _split_artist_string(s.get("artist", ""))
+        song_genre = s.get("genre")
+        song_album = s.get("album")
+        song_id = s.get("id")
+        
+        score = 0.0
+        is_candidate = False
+        
+        # 1. Explicit Matches (Weight 10.0)
+        if any(a in exp_a for a in song_artists) or song_genre in exp_g or song_album in exp_al:
+            score += 10.0
+            is_candidate = True
+            
+        # 2. Semantic Vibe Matches (Weight 3.0)
+        if song_id in sem_ids:
+            score += 3.0
+            is_candidate = True
 
-    for chunk in chunk_list(songs_to_use, chunk_size):
-        chunk_json = json.dumps(chunk).replace("```", "`\u200c`\u200c`")
+        # 3. Context Matches (Weight 5.0)
+        if song_id in ctx_ids or any(a in ctx_a for a in song_artists) or song_genre in ctx_g or song_album in ctx_al:
+            score += 5.0
+            is_candidate = True
+            
+        # 4. LLM Selected Matches (Weight 2.0)
+        if any(a in sel_a for a in song_artists) or song_genre in sel_g or song_album in sel_al:
+            score += 2.0
+            is_candidate = True
+            
+        if is_candidate:
+            # Starred boost for candidates (+0.5)
+            if s.get("starred"):
+                score += 0.5
+                
+            s_copy = s.copy()
+            s_copy["_relevance_score"] = score
+            filtered.append(s_copy)
 
-        # How many songs must this chunk contribute?
-        min_needed = max(1, math.ceil(len(chunk) * required_ratio))
+    # Sort by relevance
+    filtered.sort(key=lambda x: x.get("_relevance_score", 0), reverse=True)
+    
+    # Cap candidate pool at Top 1000
+    if len(filtered) > 1000:
+        filtered = filtered[:1000]
+        print(f"Caped candidate pool to top 1000 songs.")
+    
+    return filtered
 
-        # Randomly chosen diversity options to slightly bias the selection a little differently each time.
-        diversity_options = ["Slightly prefer songs where 'starred' IS true, as long as they fit the vibe.",
-                             "Slightly prefer songs where 'starred' IS NOT true, as long as they fit the vibe.",
-                             "Slightly prefer songs from MORE popular artists, as long as they fit the vibe.",
-                             "Slightly prefer songs from LESS popular artists, as long as they fit the vibe."]
 
-        sys_msg = {
-            "role": "system",
-            "content": (
-                "You are a playlist‑builder AI.\n"
-                "Rules (apply across the FINAL playlist, not just this chunk):\n"
-                f"• {random.choice(diversity_options)} This is not a requirement.\n"
-                "• Ensure artist diversity – ensure a healthy mix of all artists you see, UNLESS specific artists have been requested.\n"
-                "• Obey the guideline and output schema exactly.\n"
-                "• Return exactly one JSON object like:\n"
-                '{"playlist": [{{"id": "…", "title": "…"}}, …]}\n'
-                f"• **Include AT LEAST {min_needed} song(s) from this chunk.**\n"
-                "• No other keys, arrays, or commentary.\n"
-                "• Do not wrap your response in triple-backticks.\n"
-            ),
-        }
 
-        user_msg = {
-            "role": "user",
-            "content": (
-                f"Vibe prompt: {prompt}\n\nSelect songs from the given options. Return the song id and titles of songs to include EXACTLY as provided in the list of available songs.\n"
-                f"Available songs: {chunk_json}\n\nReply with JSON **only** in the format described above."
-            ),
-        }
+def generate_playlist_single_call(
+    prompt: str,
+    filtered_songs: list[dict],
+    min_songs: int,
+    explicit_artists: list[str] = None
+) -> list[dict]:
+    """
+    Generate playlist with a single LLM call. Improved parsing and fallback.
+    """
+    explicit_artist_str = ", ".join(explicit_artists or [])
+    
+    # Prepare songs (simplified for LLM to avoid context bloat)
+    songs_for_llm = [
+        {"id": s["id"], "title": s["title"], "artist": s.get("artist", "Unknown")}
+        for s in filtered_songs
+    ]
+    songs_json = json.dumps(songs_for_llm)
+    
+    diversity_options = [
+        "Slightly prefer starred songs if they fit.",
+        "Ensure artist diversity unless specific artists were requested.",
+        "Create a cohesive flow between tracks."
+    ]
 
-        raw = _strip_fences(_llm_chat([sys_msg, user_msg]))
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are a playlist-builder AI.\n"
+            "Rules:\n"
+            f"• {random.choice(diversity_options)}\n"
+            "• Ensure healthy artist/genre mix.\n"
+            "• Return exactly ONE JSON object like:\n"
+            '  {"playlist": [{"id": "...", "title": "..."}, ...]}\n'
+            f"• Include exactly {min_songs} songs.\n"
+            "• Use ONLY the IDs and titles provided below.\n"
+            "• Do NOT wrap in triple-backticks. Respond with JSON ONLY."
+        ),
+    }
+    
+    user_msg = {
+        "role": "user",
+        "content": f"Vibe: {prompt}\n\nAvailable Songs:\n{songs_json}"
+    }
+    
+    raw = _strip_fences(_llm_chat([system_msg, user_msg]))
+    
+    try:
+        parsed = json.loads(raw)
+        picked = parsed.get("playlist", [])
+        if not picked and isinstance(parsed, list):
+            picked = parsed
+
+        # Resolve IDs (robust matching)
+        id_to_song = {s["id"]: s for s in filtered_songs}
+        playlist = []
+        for item in picked:
+            if isinstance(item, str): # Just an ID
+                sid = item
+            else: # Dictionary
+                sid = item.get("id")
+            
+            if sid and sid in id_to_song:
+                playlist.append({"id": sid, "title": id_to_song[sid]["title"]})
+            else:
+                # Try title match as fallback
+                title = item.get("title", "").lower() if isinstance(item, dict) else ""
+                if title:
+                    for s in filtered_songs:
+                        if s["title"].lower() == title:
+                            playlist.append({"id": s["id"], "title": s["title"]})
+                            break
+        
+        # Pad if needed
+        if len(playlist) < min_songs:
+            playlist = ensure_min_songs(playlist, filtered_songs, min_songs)
+            
+        return playlist
+        
+    except Exception as e:
+        print(f"[ERROR] Playlist generation failed: {e}. Raw: {raw[:100]}")
+        return [{"id": s["id"], "title": s["title"]} for s in filtered_songs[:min_songs]]
+
+
+def generate_playlist_chunked(
+    prompt: str,
+    filtered_songs: list[dict],
+    min_songs: int,
+    chunk_size: int = 200,
+    explicit_artists: list[str] = None
+) -> list[dict]:
+    """
+    Generate playlist using chunked processing for large candidate pools.
+    
+    Args:
+        prompt: User's vibe prompt
+        filtered_songs: Pre-filtered candidate songs
+        min_songs: Minimum number of songs to include
+        chunk_size: Number of songs to process per chunk (default: 200)
+        explicit_artists: Artists explicitly mentioned in prompt
+    
+    Returns:
+        List of playlist items: [{"id": "...", "title": "..."}, ...]
+    """
+    if len(filtered_songs) <= chunk_size:
+        # If candidates fit in one chunk, use single-call generation
+        return generate_playlist_single_call(
+            prompt=prompt,
+            filtered_songs=filtered_songs,
+            min_songs=min_songs,
+            explicit_artists=explicit_artists
+        )
+    
+    # Split into chunks, maintaining score order (already sorted)
+    num_chunks = math.ceil(len(filtered_songs) / chunk_size)
+    print(f"Processing {len(filtered_songs)} songs in {num_chunks} chunks of {chunk_size}")
+    
+    all_selections = []
+    songs_per_chunk = math.ceil(min_songs / num_chunks)
+    
+    for i in range(num_chunks):
+        start_idx = i * chunk_size
+        end_idx = min(start_idx + chunk_size, len(filtered_songs))
+        chunk = filtered_songs[start_idx:end_idx]
+        
+        print(f"Chunk {i+1}/{num_chunks}: {len(chunk)} songs")
+        
+        # Request proportional number of songs from this chunk
+        chunk_target = min(songs_per_chunk, len(chunk))
+        
         try:
-            parsed = json.loads(raw)
-            picked = parsed.get("playlist", [])
-
-            # If the model still under-delivered, pad with random extras from this chunk
-            if len(picked) < min_needed:
-                remaining = [
-                    s for s in chunk
-                    if s["id"] not in {p["id"] for p in picked}
-                ]
-                random.shuffle(remaining)
-                picked.extend(
-                    {"id": s["id"], "title": s["title"]}
-                    for s in remaining[: (min_needed - len(picked))]
-                )
-
-            playlist.extend(picked)
+            chunk_playlist = generate_playlist_single_call(
+                prompt=prompt,
+                filtered_songs=chunk,
+                min_songs=chunk_target,
+                explicit_artists=explicit_artists
+            )
+            all_selections.extend(chunk_playlist)
         except Exception as e:
-            print(f"WARNING: JSON parse error – {e}. Raw start: {raw[:120]}")
-        bar.update(len(chunk))
-    bar.close()
+            print(f"[WARN] Chunk {i+1} failed: {e}")
+            # Fallback: take top-scored songs from this chunk
+            fallback = [{"id": s["id"], "title": s["title"]} for s in chunk[:chunk_target]]
+            all_selections.extend(fallback)
+    
+    # Deduplicate and trim to requested size
+    seen_ids = set()
+    unique_selections = []
+    for item in all_selections:
+        if item["id"] not in seen_ids:
+            seen_ids.add(item["id"])
+            unique_selections.append(item)
+    
+    # If we don't have enough, pad with top-scored unused songs
+    if len(unique_selections) < min_songs:
+        unique_selections = ensure_min_songs(unique_selections, filtered_songs, min_songs)
+    
+    return unique_selections[:min_songs]
 
-    return playlist
 
 # --------------------------------------------------
 # PLAYLIST PUSH/UPDATE HELPERS
@@ -582,12 +692,11 @@ def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], a
         "role": "system",
         "content": (
             "You are a playlist-builder AI.\n"
-            "Given a vibe prompt and a list of **playlist names only**, select **one** playlist that best matches the vibe "
-            "or was explicitly requested.\n\n"
-            "• Reply with a **single JSON object** exactly like: {\"playlist_name\": \"Chosen Playlist\"}\n"
-            "• If none are relevant, reply with an **empty object**: {}\n"
-            "• Do **not** return comments, arrays, or extra keys.\n"
-            "• Your entire reply **must** be valid JSON. Do not wrap in ``` fences."
+            "Rules:\n"
+            "  - Reply with a single JSON object exactly like: {\"playlist_name\": \"Chosen Playlist\"}\n"
+            "  - If none are relevant, reply with an empty object: {}\n"
+            "  - Do not return comments, arrays, or extra keys.\n"
+            "  - Your entire reply must be valid JSON. Do not wrap in backticks."
         ),
     }
     user_msg = {
@@ -602,7 +711,7 @@ def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], a
         parsed = json.loads(raw)
         playlist_name = parsed.get("playlist_name", "").strip()
     except Exception as e:
-        print(f"WARNING: JSON parse error – {e}. Raw start: {raw[:120]}")
+        print(f"WARNING: JSON parse error - {e}. Raw start: {raw[:120]}")
         playlist_name = ""
     if not playlist_name:
         return []
@@ -640,7 +749,7 @@ def _sanitize_playlist(entries: List[dict], candidates: List[dict], fuzzy_thresh
     Ensure each playlist entry has an 'id'. If an entry only has a 'title'
     (and optionally 'artist'), try to resolve the matching song in *candidates*
     via a case-insensitive title-and-artist match. If that fails, use fuzzy matching
-    on title and artist. Drop any rows we can’t resolve. This is backend-agnostic and
+    on title and artist. Drop any rows we can't resolve. This is backend-agnostic and
     therefore safe for both Ollama and OpenAI modes.
     """
     id_by_pair = {
@@ -682,78 +791,36 @@ STOPWORDS = {'and', 'but', 'mix', 'the', 'a', 'an', 'of', 'in', 'on', 'for', 'to
 
 def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: list[str]) -> dict:
     """
-    Extract artists and genres mentioned in the prompt.
+    Extract artists and genres mentioned in the prompt using smart partial matching.
+    Handles partial names like 'gambino' -> 'Childish Gambino'.
     Returns a dict with keys: 'artists', 'genres'.
     """
     entities = {'artists': [], 'genres': []}
+    
+    # Clean prompt: remove stopwords and punctuation, split into words
     prompt_lc = prompt.lower()
-    # Artists
+    stopwords = {'and', 'the', 'a', 'an', 'of', 'in', 'on', 'for', 'to', 'from', 'by', 'with', 'at', 'as', 'is', 'it', 'or'}
+    prompt_words = set(re.findall(r'\b\w+\b', prompt_lc)) - stopwords
+    
+    # Artists: check both exact and partial matches
     for artist in all_artists:
-        if artist.lower() in prompt_lc:
+        artist_lc = artist.lower()
+        artist_words = set(re.findall(r'\b\w+\b', artist_lc)) - stopwords
+        
+        # Exact match (full artist name in prompt)
+        if artist_lc in prompt_lc:
             entities['artists'].append(artist)
-    # Genres
+        # Partial match (any significant word from artist name in prompt)
+        elif artist_words & prompt_words:  # Intersection
+            entities['artists'].append(artist)
+    
+    # Genres: exact match only (genres are typically single words or short phrases)
     for genre in all_genres:
         if genre.lower() in prompt_lc:
             entities['genres'].append(genre)
+    
     return entities
 
-# New function to select relevant albums using LLM
-
-def select_relevant_albums_llm(prompt: str, all_albums: list[str], n: int = 5) -> list[str]:
-    """
-    Use the LLM to select up to n relevant albums from all_albums for the given prompt.
-    If embedding_mgr is available, pre-filter to 35% using embeddings.
-    The LLM must return a JSON object: {"albums": [ ... ]} (never a list or dict with other keys).
-    Only albums in all_albums are valid. If the response is not valid, return [].
-    """
-    # Pre-filter with embeddings if available
-    albums_to_use = all_albums
-    if embedding_mgr is not None and len(all_albums) > 0:
-        try:
-            top_k = max(1, int(len(all_albums) * 0.35))
-            pre_filtered = embedding_mgr.find_similar(prompt, all_albums, top_k=top_k)
-            if pre_filtered:
-                print(f"[INFO] Pre-filtered {len(all_albums)} albums to {len(pre_filtered)} using embeddings")
-                albums_to_use = pre_filtered
-            else:
-                # Fallback if embedding filtering failed
-                logging.warning("Embedding pre-filtering returned empty, using all albums")
-        except Exception as e:
-            logging.warning(f"Embedding pre-filtering failed: {e}. Using all albums.")
-    
-    system_msg = {
-        "role": "system",
-        "content": (
-            f"You are a music‑curation assistant. Given a vibe prompt and a list of album names, "
-            f"return up to {n} album names from the list that are most relevant to the prompt, as a JSON object.\n"
-            f"You MUST ONLY select from the provided list. Do NOT invent or return any item not in the list.\n"
-            f"If the prompt specifically mentions anything in the list, be SURE to include it.\n"
-            f"If nothing matches or seems relevant, return an empty list.\n"
-            f"Return **only** a JSON object in this format: {{\"albums\": [ ... ]}}. No other keys, no comments, no prose.\n"
-            f"Do NOT return a list, mapping, or dictionary with other keys. Only a JSON object with an 'albums' array."
-        ),
-    }
-    user_msg = {
-        "role": "user",
-        "content": (
-            f"Vibe prompt: \"{prompt}\"\n\nAvailable albums ({len(albums_to_use)}): {albums_to_use}\n\n"
-            f"Respond with **ONLY** a JSON object: {{\"albums\": [ ... ]}} (no extra keys, no prose)."
-        ),
-    }
-    raw = _strip_fences(_llm_chat([system_msg, user_msg]))
-    try:
-        parsed = json.loads(raw)
-        if not (isinstance(parsed, dict) and "albums" in parsed and isinstance(parsed["albums"], list)):
-            print(f"[WARN] LLM did not return a valid albums object: {raw}")
-            return []
-        valid = [x for x in parsed["albums"] if x in all_albums]
-        dropped = [x for x in parsed["albums"] if x not in all_albums]
-        if dropped:
-            print(f"[WARN] LLM returned {len(dropped)} invalid albums: {dropped}")
-        return valid[:n]
-    except Exception:
-        print(f"[WARN] JSON parse error: {raw}")
-        return []
 
 # --------------------------------------------------
 # MAIN (updated flow with context playlist)
@@ -763,169 +830,177 @@ def _main_impl(args):
     playlist_name = args.playlist_name
     prompt = args.prompt or input("Enter a prompt for the playlist vibe: ").strip()
     if not prompt:
-        print("Prompt required – exiting.")
+        print("Prompt required - exiting.")
         return
 
-    print("Fetching library…")
+    print("=== NaviDJ - AI Playlist Generator ===")
+    print("="*60)
+
+    # ========== STAGE 0: LIBRARY FETCH ==========
+    start_t = time.time()
     all_songs = fetch_all_subsonic_songs()
     if not all_songs:
         print("No songs found on the server.")
         return
-    print("\n")
+    print(f"Library fetch complete: {len(all_songs)} songs ({time.time()-start_t:.1f}s)")
 
-    print("Choosing context...")
-    existing_playlists = fetch_all_playlists(exclude_name=playlist_name)
-    # Select context playlist songs
-    context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs)
-
-    # Fetch full library artists/genres/albums
+    # ========== STAGE 1: METADATA GATHERING ==========
+    start_t = time.time()
     all_artists = fetch_all_artists()
-    random.shuffle(all_artists)
     all_genres = fetch_all_genres()
-    random.shuffle(all_genres)
     all_albums = [a for a in {s.get('album') for s in all_songs if s.get('album')} if isinstance(a, str)]
-    random.shuffle(all_albums)
     
-    # Check if library size has increased and invalidate embedding cache if needed
-    if embedding_mgr is not None:
-        library_size = len(all_artists) + len(all_genres) + len(all_albums)
-        embedding_mgr.check_library_size(library_size)
+    # Randomize to avoid bias
+    random.shuffle(all_artists)
+    random.shuffle(all_genres)
+    random.shuffle(all_albums)
+    print(f"Gathered metadata: {len(all_artists)} artists, {len(all_genres)} genres, {len(all_albums)} albums ({time.time()-start_t:.1f}s)")
 
+    # ========== SEMANTIC PRE-FILTERING (OPTIONAL) ==========
+    start_t = time.time()
+    sem_artists = all_artists
+    sem_genres = all_genres
+    sem_albums = all_albums
+    semantic_song_ids = set()
 
-    print("Analyzing request...")
-    # Extract prompt entities (artists, genres)
-    prompt_entities = extract_prompt_entities(prompt, all_artists, all_genres)
-    explicit_prompt_artists = prompt_entities['artists']
-    explicit_prompt_genres = prompt_entities['genres']
+    if embedding_manager:
+        print(f"Using embedding model: {EMBEDDING_MODEL}")
+        embedding_manager.check_library_size(len(all_songs))
+        
+        # 1. Semantic Metadata Pre-selection (Top 40 each)
+        print("Performing semantic metadata pre-selection...")
+        sem_artists = embedding_manager.find_similar(prompt, all_artists, top_k=40)
+        sem_genres = embedding_manager.find_similar(prompt, all_genres, top_k=40)
+        sem_albums = embedding_manager.find_similar(prompt, all_albums, top_k=40)
+        
+        # 2. Semantic Song Pre-selection (Top 200)
+        print("Finding semantically similar songs...")
+        song_texts = [f"{s.get('title','')} by {s.get('artist','')}" for s in all_songs]
+        sem_song_indices = embedding_manager.find_similar_indices(prompt, song_texts, top_k=200)
+        semantic_song_ids = {all_songs[idx]["id"] for idx in sem_song_indices if idx < len(all_songs)}
+        
+        print(f"Semantic pre-filtering complete ({time.time()-start_t:.1f}s)")
+    else:
+        print("Skipping semantic pre-filtering (no embedding manager initialized).")
 
-    print("Connsidering albums...")
-    # Use LLM to select up to 5 relevant albums
-    relevant_albums = select_relevant_albums_llm(prompt, all_albums, n=7)
-    album_artists = []
-    album_genres = []
-    if relevant_albums:
-        album_songs = [s for s in all_songs if s.get('album') in relevant_albums]
-        context_song_ids = {s['id'] for s in context_songs} if context_songs else set()
-        new_album_songs = [s for s in album_songs if s['id'] not in context_song_ids]
-        if context_songs:
-            context_songs = context_songs + new_album_songs
-        else:
-            context_songs = new_album_songs
-        # Collect artists and genres from relevant albums
-        for s in album_songs:
-            if s.get('artist'):
-                individual_artists = _split_artist_string(s['artist'])
-                album_artists.extend(individual_artists)
-            if s.get('genre'):
-                album_genres.append(s['genre'])
-        album_artists = list(dict.fromkeys(album_artists))  # Remove duplicates
-        album_genres = list(dict.fromkeys(album_genres))
-        print("Focus albums: ", ", ".join(relevant_albums))
-
-    # Extract artists/genres from context playlist (weighted highest)
+    # ========== CONTEXT ANALYSIS ==========
+    start_t = time.time()
+    existing_playlists = fetch_all_playlists(exclude_name=playlist_name)
+    context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs)
+    
+    # Extract metadata from context
     context_artists = []
     context_genres = []
+    context_albums = []
     if context_songs:
-        # Use the helper function to properly split artist strings
         for s in context_songs:
             if s.get("artist"):
-                individual_artists = _split_artist_string(s["artist"])
-                context_artists.extend(individual_artists)
-        context_artists = list(dict.fromkeys(context_artists))  # Remove duplicates
-        for s in context_songs:
+                context_artists.extend(_split_artist_string(s["artist"]))
             if s.get("genre"):
-                raw = s["genre"].replace(";", ",").replace("•", ",")
-                for g in raw.split(","):
-                    name = g.strip()
-                    if name:
-                        context_genres.append(name)
+                context_genres.append(s["genre"])
+            if s.get("album"):
+                context_albums.append(s["album"])
+        context_artists = list(dict.fromkeys(context_artists))
         context_genres = list(dict.fromkeys(context_genres))
-
-    # Continue as before, but use album_filtered_songs for focus selection
-    num_artists: int = 20
-    num_genres:  int = 40
-
-    print("Choosing top artists and genres...")
-    init_focus_artists = select_top_items(prompt, all_artists, num_artists, "artists")
-    init_focus_genres  = select_top_items(prompt, all_genres, num_genres, "genres")
-
-    # Combine context, prompt, and LLM-selected for focus
-    focus_artists = list(dict.fromkeys(
-        explicit_prompt_artists + album_artists + context_artists + init_focus_artists
-    ))
-    print("Focus artists:", ", ".join(focus_artists))
+        context_albums = list(dict.fromkeys(context_albums))
     
-    focus_genres = list(dict.fromkeys(
-        explicit_prompt_genres + album_genres + context_genres + init_focus_genres 
-    ))
-    print("Focus genres: ", ", ".join(focus_genres))
+    # Extract explicit mentions from prompt
+    prompt_entities = extract_prompt_entities(prompt, all_artists, all_genres)
+    explicit_artists = prompt_entities['artists']
+    explicit_genres = prompt_entities['genres']
+    
+    # For albums, we'll track context albums separately (no explicit album extraction yet)
+    explicit_albums = []
+    
+    print(f"Context analysis complete ({time.time()-start_t:.1f}s)")
+    
+    if explicit_artists:
+        print(f"Explicit artists identified: {', '.join(explicit_artists)}")
+    if explicit_genres:
+        print(f"Explicit genres identified: {', '.join(explicit_genres)}")
 
-    # Filter library based on focus
-    print("\nFiltering library...")
-    filtered = []
-    for s in all_songs:
-        # Split the song's artist field and check if any individual artist matches
-        song_artists = _split_artist_string(s.get("artist", ""))
-        artist_match = any(artist in focus_artists for artist in song_artists)
-        genre_match = s.get("genre") in focus_genres
-        if artist_match and genre_match:
-            filtered.append(s)
-    # Also include all songs from relevant albums, avoiding duplicates
-    if relevant_albums:
-        filtered_ids = {s['id'] for s in filtered}
-        album_songs = [s for s in all_songs if s.get('album') in relevant_albums and s['id'] not in filtered_ids]
-        filtered_ids.update(s['id'] for s in album_songs)
-        filtered.extend(album_songs)
-    if not filtered and not context_songs:
-        print("No songs match the selected artists/genres – aborting.")
+    # ========== STAGE 1: METADATA SELECTION ==========
+    start_t = time.time()
+    selected_metadata = select_focus_metadata_single_call(
+        prompt=prompt,
+        all_artists=sem_artists,
+        all_genres=sem_genres,
+        all_albums=sem_albums
+    )
+    
+    duration = time.time() - start_t
+    
+    # Display selected metadata (for debugging)
+    all_artists_combined = list(dict.fromkeys(explicit_artists + context_artists + selected_metadata["artists"]))
+    all_genres_combined = list(dict.fromkeys(explicit_genres + context_genres + selected_metadata["genres"]))
+    all_albums_combined = list(dict.fromkeys(context_albums + selected_metadata["albums"]))
+    
+    print(f"Chosen Artists: {', '.join(all_artists_combined)}")
+    print(f"Chosen Genres: {', '.join(all_genres_combined)}")
+    print(f"Chosen Albums: {', '.join(all_albums_combined)}")
+    print(f"Metadata selection complete ({duration:.1f}s)")
+
+    # ========== STAGE 2: WEIGHTED METADATA FILTER ==========
+    start_t = time.time()
+    context_song_ids = {s["id"] for s in context_songs} if context_songs else set()
+    
+    candidate_pool = filter_library_by_metadata(
+        explicit_artists=explicit_artists,
+        explicit_genres=explicit_genres,
+        explicit_albums=explicit_albums,
+        context_artists=context_artists,
+        context_genres=context_genres,
+        context_albums=context_albums,
+        selected_artists=selected_metadata["artists"],
+        selected_genres=selected_metadata["genres"],
+        selected_albums=selected_metadata["albums"],
+        all_songs=all_songs,
+        context_song_ids=context_song_ids,
+        semantic_song_ids=semantic_song_ids
+    )
+    print(f"Final candidate pool: {len(candidate_pool)} songs ({time.time()-start_t:.1f}s)")
+    
+    if not candidate_pool:
+        print("\nNo songs match the selected criteria. Try a different prompt.")
         return
 
-    # Combine filtered with context songs, no duplicates
-    if context_songs:
-        filtered_ids = {s["id"] for s in filtered}
-        combined_songs = filtered + [s for s in context_songs if s["id"] not in filtered_ids]
-    else:
-        combined_songs = filtered
-
-    random.shuffle(combined_songs)
-    print(f"Generating playlist ({len(combined_songs)} candidate songs)…")
-
-    # We need at least args.min_songs tracks in total → derive a ratio
-    required_ratio = args.min_songs / max(1, len(combined_songs))
-
-    # Get chunk size from configuration, default to 500
-    chunk_size = int(secrets.get("llm", "chunk_size", fallback=500))
-    playlist_items = generate_playlist(
-        prompt,
-        combined_songs,
-        chunk_size=chunk_size,
-        required_ratio=required_ratio,
+    # ========== STAGE 3: PLAYLIST GENERATION ==========
+    start_t = time.time()
+    playlist_items = generate_playlist_chunked(
+        prompt=prompt,
+        filtered_songs=candidate_pool,
+        min_songs=args.min_songs,
+        chunk_size=args.chunk_size,
+        explicit_artists=explicit_artists
     )
-    print(f"Generated {len(playlist_items)} tracks from {len(combined_songs)} candidates.")
-    playlist_items = ensure_min_songs(playlist_items, combined_songs, args.min_songs)
+    print(f"Final playlist generated: {len(playlist_items)} tracks ({time.time()-start_t:.1f}s)")
 
-    # Resolve any entries missing an 'id' before upload (with fuzzy matching)
-    playlist_items = _sanitize_playlist(playlist_items, combined_songs)
-
-    # After sanitization, ensure we still meet the minimum song count
-    playlist_items = ensure_min_songs(playlist_items, combined_songs, args.min_songs)
+    # Sanitize playlist (resolve any missing IDs)
+    playlist_items = _sanitize_playlist(playlist_items, candidate_pool)
 
     if not playlist_items:
-        print("LLM returned an empty playlist.")
+        print("\nFailed to generate playlist.")
         return
 
-    print(f"Got {len(playlist_items)} tracks. Pushing to server…")
+    # ========== STAGE 4: UPLOAD TO SERVER ==========
+    start_t = time.time()
     song_ids = [t["id"] for t in playlist_items]
-    if _update_playlist_on_server(playlist_name, song_ids, prompt):
-        print(f"SUCCESS: Playlist '{playlist_name}' updated!")
+    success = _update_playlist_on_server(playlist_name, song_ids, prompt)
+    
+    if success:
+        print(f"Playlist '{playlist_name}' successfully updated on server ({time.time()-start_t:.1f}s)")
     else:
         print("ERROR: Failed to update playlist on server.")
+    
+    print("\nComplete!")
+    print("="*60)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate a playlist based on a vibe prompt.")
     parser.add_argument("--playlist_name", type=str, default="naviDJ", help="Name of the playlist to create or update.")
     parser.add_argument("--prompt", type=str, help="Vibe prompt for the playlist.")
     parser.add_argument("--min_songs", type=int, default=35, help="Minimum number of songs in the playlist.")
+    parser.add_argument("--chunk_size", type=int, default=200, help="Number of songs per LLM chunk (adjust based on context size).")
     parser.add_argument("--llm_mode", type=str, choices=["openai", "ollama"], default=DEFAULT_LLM_MODE, help="Which LLM backend to use (overrides secrets.txt).")
     parser.add_argument("--llm_model", type=str, default=DEFAULT_LLM_MODEL, help="Which LLM model to use (overrides secrets.txt).")
     args = parser.parse_args()

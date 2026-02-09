@@ -180,6 +180,15 @@
                             </div>
                         </div>
                     </div>
+                    <div class="row mb-3">
+                        <div class="col-md-12">
+                            <label class="form-label">chunk size (songs per batch)</label>
+                            <input type="number" class="form-control" name="chunk_size"
+                                value="{{ config.get('llm', 'chunk_size', fallback='200') }}">
+                            <small class="form-text text-muted">Adjust based on LLM context limits (e.g., 200 for
+                                Ollama, 500 for OpenAI).</small>
+                        </div>
+                    </div>
                     <div class="mb-3">
                         <label class="form-label">what vibe are you going for?</label>
                         <textarea class="form-control" name="prompt" rows="4" required id="djPromptInput"
