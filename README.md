@@ -4,10 +4,13 @@
 A set of utilities for syncing playlists between Subsonic/Navidrome and Spotify and an AI powered DJ script to use with your music server to generate playlists as you please.
 
 ## Features
-- **naviDJ.py**: AI-powered playlist generator for Subsonic/Navidrome using OpenAI, Ollama, or a Custom OpenAI-compatible API. Adds smarter focus via context playlists and optionally relevant albums from your library.
+- **naviDJ.py**: AI-powered playlist generator for Subsonic/Navidrome using OpenAI, Ollama, or a Custom OpenAI-compatible API.
+    - **Semantic Optimization**: Uses embedding-based similarity search to pre-filter your library, reducing token usage by 80-90% and speeding up generation.
+    - **Chunked Generation**: Processes large song lists in configurable batches to handle context window limits and improve accuracy.
+    - **Context Awareness**: Adds smarter focus via context playlists and relevant albums from your library.
 - **portLibrary.py**: Syncs starred/liked songs and playlists between Spotify and Subsonic/Navidrome (both directions).
-- **portGenres.py**: Updates local music file genres using MusicBrainz tags. The DJ script uses genres to filter songs by, and more detailed genres, such as those from MusicBrainz, helps it filter more effectively, but by no means am I asking you to overwrite all your genres on your files to use these scripts. I'd be interested to see how the DJ performs with different types of metadata and how people tag their genres.
-- **Web App**: Modern web interface with configuration management, Spotify login, model picker, real-time output, and a playlist chooser for selecting owned Spotify playlists when importing.
+- **portGenres.py**: Updates local music file genres using MusicBrainz tags.
+- **Web App**: Modern web interface with configuration management, Spotify login, model picker, and real-time output.
 
 **Note on Open WebUI**: This project fully supports Open WebUI! You can use it as a robust proxy for Ollama by selecting "ollama" mode and pointing the URL to your Open WebUI instance. This allows you to leverage Open WebUI's features like custom context lengths and model management while using naviDJ.
 
@@ -47,14 +50,15 @@ A simple web interface is now available for managing your naviFy tools!
    - `pip install -r requirements.txt`
 3. **Create a `secrets.txt` file in the repo root:**
 
-```
+```ini
 [music_directory]
+# Optional: Path to your music directory
 MUSIC_DIR = <path to your music directory here>
 
 [llm]
-# Set the default LLM backend and model for naviDJ.py: "openai", "ollama", or "custom"
+# Set the default LLM backend: "openai", "ollama", or "custom"
 MODE = openai
-# e.g. gpt-4o-mini, gpt-3.5-turbo, deepseek-r1:latest, gemma3n:latest, etc.
+# LLM model name (e.g. gpt-4o-mini, gemma3n:latest)
 MODEL = gpt-4o-mini
 # Number of songs to process at once. Lower values reduce token usage but may be slower.
 # Default: 500
@@ -62,17 +66,20 @@ CHUNK_SIZE = 500
 
 [openai]
 OPENAI_KEY = <your-openai-api-key>
+# Recommended: Embedding model for semantic search
+EMBEDDING_MODEL = text-embedding-3-small
 
 [ollama]
-# For local Ollama: http://localhost:11434/v1
-# For Open WebUI: http://localhost:3000/api (Use API Key from Open WebUI settings)
+# URL for local Ollama (http://localhost:11434/v1) or Open WebUI (http://localhost:3000/api)
 OLLAMA_BASE = <your-ollama-or-openwebui-url>
-# Optional: API Key for Open WebUI or protected Ollama instances
+# API Key (Required for Open WebUI, optional for local Ollama)
 API_KEY = <your-api-key>
+# Recommended: Embedding model for semantic search
+EMBEDDING_MODEL = nomic-embed-text
 
 [custom]
-# Use a custom OpenAI-compatible API (optional)
-BASE_URL = <your-custom-api-base-url>  # e.g. https://your-endpoint.example.com/v1
+# For OpenAI-compatible APIs
+BASE_URL = <your-custom-api-base-url>
 API_KEY = <your-custom-api-key>
 
 [subsonic]
@@ -83,11 +90,11 @@ API_VERSION = 1.16.1
 CLIENT = naviFy_scripts
 
 [spotify]
-SCOPE = user-read-private user-read-playback-state user-library-read user-library-modify playlist-read-private playlist-modify-public playlist-modify-private
 CLIENT_ID = <your-spotify-client-id>
 CLIENT_SECRET = <your-spotify-client-secret>
-REDIRECT_URI = http://localhost:5000/        # or use http://localhost:5000/spotify/callback
+REDIRECT_URI = http://localhost:5000/
 CACHE_PATH = .cache-spotify
+SCOPE = user-read-private user-read-playback-state user-library-read user-library-modify playlist-read-private playlist-modify-public playlist-modify-private
 ```
 
 An example file for you to use and rename has also been provided.
@@ -100,7 +107,7 @@ An example file for you to use and rename has also been provided.
 
 ### Spotify API Setup Guide
 
-To use the Spotify OAuth authentication in the web app, you need to create a Spotify application:
+To use the Spotify OAuth authentication, you need to create a Spotify application:
 
 1. **Create a Spotify App:**
    - Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
@@ -113,9 +120,7 @@ To use the Spotify OAuth authentication in the web app, you need to create a Spo
    - Click "Save"
 
 2. **Get Your Credentials:**
-   - After creating the app, you'll see your **Client ID** and **Client Secret**
-   - Copy these values to your `secrets.txt` file
-
+   - Copy the **Client ID** and **Client Secret** to your `secrets.txt`.
 3. **Configure Redirect URIs:**
    - In your Spotify app settings, add the redirect URI that matches your setup:
      - **Local development**: `http://localhost:5000/` (or `http://localhost:5000/spotify/callback`)
@@ -135,143 +140,73 @@ To use the Spotify OAuth authentication in the web app, you need to create a Spo
 
 **Note:** If you change the port or domain where you host the Flask app, remember to update both your Spotify app settings and the `REDIRECT_URI` in your `secrets.txt` file.
 
-### Embedding Models (Optional but Recommended)
+## Semantic Optimization (Recommended)
 
-When using Ollama or OpenAI as your LLM backend, you can optionally configure an embedding model to significantly improve performance. Embedding models are used for semantic search to pre-filter large lists of artists, genres, albums, and songs before sending them to the LLM. This reduces token usage by 80-90% while maintaining identical output quality.
+When using Ollama or OpenAI, you can configure an `EMBEDDING_MODEL` to significantly improve performance. 
 
 **Benefits:**
-- **Faster playlist generation**: Pre-filtering reduces the amount of data sent to the LLM
-- **Lower token costs**: Fewer tokens means lower API costs (for paid services) or faster processing
-- **Same quality**: The LLM still makes all final decisions, so output quality is identical
+- **Drastically Faster**: Reduces the song list sent to the LLM, making generation much faster.
+- **Cost Efficient**: Drops token usage by up to 90% while maintaining identical playlist quality.
+- **Batch Processing**: Automatically uses batch API calls for local caches to speed up initial library indexing.
 
 **Setup for Ollama:**
-1. **Pull an embedding model** using Ollama:
+1. Pull an embedding model:
    ```bash
    ollama pull nomic-embed-text
    ```
-   Or for faster processing (lower quality):
-   ```bash
-   ollama pull all-minilm
-   ```
-
-2. **Configure in `secrets.txt`**:
-   ```
-   [ollama]
-   OLLAMA_BASE = http://localhost:11434/v1
-   EMBEDDING_MODEL = nomic-embed-text
-   # Optional: Set context window size (default: 8192)
-   CONTEXT_LENGTH = 8192
-   ```
-
-**Context Length for Ollama:**
-The `CONTEXT_LENGTH` parameter controls the context window size for Ollama models. A larger context window allows the model to consider more tokens at once when generating responses, which can improve generation speed and prevent truncation. The default is 8192 tokens, but you can adjust this based on your model's capabilities.
-
-**Embedding Cache:**
-Embeddings are cached locally to avoid redundant API calls. The cache is automatically invalidated and regenerated when:
-- The embedding model is changed in configuration
-- The library size increases (new songs/artists/albums are added)
-
-This ensures that embeddings are always up-to-date and retrieval accuracy remains high.
+2. Add `EMBEDDING_MODEL = nomic-embed-text` to your `[ollama]` section in `secrets.txt`.
 
 **Setup for OpenAI:**
-1. **Configure in `secrets.txt`** (no need to pull models, they're available via API):
-   ```
-   [openai]
-   OPENAI_KEY = <your-openai-api-key>
-   EMBEDDING_MODEL = text-embedding-3-small
-   ```
+1. Add `EMBEDDING_MODEL = text-embedding-3-small` to your `[openai]` section in `secrets.txt`.
 
-**Recommended Models:**
-- **Ollama:**
-  - **nomic-embed-text** (default): Best quality, recommended for most users
-  - **mxbai-embed-large**: High quality alternative
-  - **all-minilm**: Fastest option, good for speed-focused setups
-- **OpenAI:**
-  - **text-embedding-3-small** (default): Best balance of quality and cost
-  - **text-embedding-3-large**: Highest quality, higher cost
-  - **text-embedding-ada-002**: Older model, still functional
-
-**Important Notes:**
-- Embedding models work with both **Ollama and OpenAI** backends (not custom APIs)
-- If no embedding model is configured, the script works exactly as before - this is fully backward compatible
-- For Ollama: The embedding model must be pulled before use: `ollama pull <model-name>`
-- For OpenAI: Embedding models are available via API, no local installation needed
-- Embeddings are cached locally in `embeddings_cache.pkl` to avoid redundant API calls
-
-The playlist sync script does attempt to sync over playlist images, however Navidrome doesn't do anything with images that are sent with a playlist. Despite this, the DJ script still uses a DJ.png file try and set a default image for the playlists, which is included for you if you'd like to use or replace it. 
+**Embedding Cache:**
+Embeddings are cached locally (e.g., `embeddings_cache_nomic-embed-text.pkl`) to avoid redundant calls. The cache automatically updates if your library grows or you change models.
 
 ---
 
 ## Usage
 
 ### Web App (Recommended)
-The easiest way to use naviFy Tools is through the web interface:
-
-1. **Start the web app:**
-   ```bash
-   python app.py
-   ```
-
-2. **Open your browser** to [http://localhost:5000](http://localhost:5000)
-
-3. **Configure your settings** in the Configuration section
-
-4. **Use the tools:**
-  - **naviDJ Tab**: Generate AI playlists with custom prompts; choose LLM backend and model.
-  - **Library Porter Tab**: Sync playlists between Spotify and your music server; select owned playlists to import.
-  - **Spotify Authentication**: Login with Spotify directly in the browser.
+1. **Start the web app:** `python app.py`
+2. **Open browser** to [http://localhost:5000](http://localhost:5000)
+3. **Configure Settings**: Use the configuration tab to manage your `secrets.txt` easily.
 
 ### Command Line Usage
 
 #### naviDJ.py
 Generate a playlist using AI:
+```bash
+python naviDJ.py --playlist_name "My Playlist" --prompt "energetic summer road trip" --min_songs 40 --chunk_size 500
 ```
-python naviDJ.py --playlist_name "My Playlist" --prompt "energetic summer road trip" --min_songs 40 --llm_mode openai --llm_model gpt-4o-mini
-```
-- If arguments are omitted, the script will use its defaults or prompt for them interactively if needed. The default playlist name is "naviDJ".
-- You can set the default LLM backend and model in `secrets.txt` under the `[llm]` section. Command-line arguments override these defaults.
-- Supports `--llm_mode` values `openai`, `ollama`, and `custom` (for an OpenAI-compatible API).
+- **Arguments**:
+  - `--playlist_name`: Name of the playlist (default: naviDJ).
+  - `--prompt`: The vibe description (required if not interactive).
+  - `--min_songs`: Target number of songs (default: 35).
+  - `--chunk_size`: Songs per batch (default: 500). Overrides `secrets.txt`.
+  - `--llm_mode`: Backend to use (`openai` or `ollama`).
+  - `--llm_model`: Specific model to use.
 
 #### portLibrary.py
-Sync playlists and likes between Spotify and Subsonic:
+Sync playlists and likes:
+```bash
+python portLibrary.py --sync-starred y --sync-playlists y --import-liked y --import-playlists y
 ```
-python portLibrary.py --sync-starred y --sync-playlists y --import-liked y --import-playlists y --playlists "Playlist1,Playlist2"
-```
-- If arguments are omitted, the script will prompt for them interactively.
-- **Note**: By default, this script ignores syncing playlists named `naviDJ`. When syncing TO Spotify, it only adds "missing" songs (it does not replace existing content). If you use a different DJ playlist name, repeated syncs will append.
+- **Note**: By default, this script ignores playlists named `naviDJ` to avoid circular syncs. When syncing TO Spotify, it only adds missing songs (does not overwrite).
 
 #### portGenres.py
-Update genres for your local music library using MusicBrainz:
-```
+Update local music tags:
+```bash
 python portGenres.py /path/to/your/music --dry-run
 ```
-- Omit `--dry-run` to actually write changes.
-- This script runs against your music files and updates the `GENRE` tag using MusicBrainz artist/album tags. It falls back to your existing tag if MB returns nothing. The DJ script benefits from richer and more granular genres, but it will work with your existing metadata too.
+- Uses MusicBrainz to update `GENRE` tags. Richer genres help `naviDJ` filter more effectively.
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
-
-**"INVALID_CLIENT: Invalid redirect URI"**
-- Make sure your Spotify app's redirect URI exactly matches the `REDIRECT_URI` in your `secrets.txt`
-- Update both your Spotify app settings and `secrets.txt` if you change ports
-
-**"Spotify credentials not configured"**
-- Ensure your `secrets.txt` has the correct `CLIENT_ID` and `CLIENT_SECRET` values
-- Check that the Spotify section exists in your configuration
-
-**Scripts not working**
-- Verify your `secrets.txt` is properly configured
-- Check that your Subsonic/Navidrome server is accessible
-- Ensure you have the required Python packages installed
-
-### Getting Help
-
-- **Never commit your `secrets.txt` file!** It is gitignored by default.
-- For detailed options, see the top of each script or run with `--help`.
-- Check the real-time output in the web app for detailed error messages.
+- **"INVALID_CLIENT: Invalid redirect URI"**: Ensure your Spotify dashboard URI matches `secrets.txt` EXACTLY.
+- **Slow Generation**: Ensure `EMBEDDING_MODEL` is configured to enable semantic pre-filtering.
+- **Parse Errors**: Check the real-time logs in the web app. If using local models, ensure they are capable of outputting valid JSON (recommended: `gpt-4o-mini`, `gemma3n`, `llama3.1`).
 
 ---
 

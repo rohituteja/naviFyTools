@@ -54,7 +54,7 @@ DEFAULT_CUSTOM_BASE_URL = secrets.get("custom", "base_url", fallback=None)
 
 DEFAULT_LLM_MODE = secrets.get("llm", "mode", fallback="openai").lower()
 DEFAULT_LLM_MODEL = secrets.get("llm", "model", fallback=None)
-DEFAULT_CHUNK_SIZE = int(secrets.get("llm", "chunk_size", fallback="200"))
+DEFAULT_CHUNK_SIZE = int(secrets.get("llm", "chunk_size", fallback="500"))
 
 
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)

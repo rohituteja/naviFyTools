@@ -214,7 +214,7 @@ def run_dj():
                 args += ['--min_songs', str(data.get('min_songs'))]
             
             # Use chunk_size from config
-            chunk_size = secrets.get('llm', 'chunk_size', fallback='200')
+            chunk_size = secrets.get('llm', 'chunk_size', fallback='500')
             args += ['--chunk_size', str(chunk_size)]
             
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
