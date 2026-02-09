@@ -384,7 +384,7 @@ def filter_library_by_metadata(
     # Cap candidate pool at Top 1000
     if len(filtered) > 1000:
         filtered = filtered[:1000]
-        print(f"Caped candidate pool to top 1000 songs.")
+        print(f"Capped candidate pool to top 1000 songs.")
     
     return filtered
 
@@ -967,6 +967,7 @@ def _main_impl(args):
 
     # ========== STAGE 3: PLAYLIST GENERATION ==========
     start_t = time.time()
+    print(f"Generating playlist... ({time.time()-start_t:.1f}s)")
     playlist_items = generate_playlist_chunked(
         prompt=prompt,
         filtered_songs=candidate_pool,
