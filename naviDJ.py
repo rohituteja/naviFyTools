@@ -321,7 +321,7 @@ def filter_library_by_metadata(
     semantic_song_ids: set[str] = None
 ) -> list[dict]:
     """
-    Filter library based on combined focus items with hierarchical weighting.
+    Filter library based on combined focus items with hierarchical, additive weighting.
     """
     # Create sets for efficient lookup
     exp_a = set(explicit_artists)
@@ -347,33 +347,37 @@ def filter_library_by_metadata(
         song_id = s.get("id")
         
         score = 0.0
-        is_candidate = False
         
-        # 1. Explicit Matches (Weight 10.0)
-        if any(a in exp_a for a in song_artists) or song_genre in exp_g or song_album in exp_al:
-            score += 10.0
-            is_candidate = True
+        # New Additive Weighting System:
+        
+        # 1. Explicit Matches (+3.0 each)
+        if any(a in exp_a for a in song_artists): score += 3.0
+        if song_genre in exp_g: score += 3.0
+        if song_album in exp_al: score += 3.0
             
-        # 2. Semantic Vibe Matches (Weight 3.0)
-        if song_id in sem_ids:
-            score += 3.0
-            is_candidate = True
+        # 2. Context Playlist Matches
+        # Explicitly in context playlist (+4.0)
+        if song_id in ctx_ids:
+            score += 4.0
+        # Metadata matches if part of context (+2.0 each)
+        if any(a in ctx_a for a in song_artists): score += 2.0
+        if song_genre in ctx_g: score += 2.0
+        if song_album in ctx_al: score += 2.0
+            
+        # 3. LLM Chosen Focus Matches (+1.5 each)
+        if any(a in sel_a for a in song_artists): score += 1.5
+        if song_genre in sel_g: score += 1.5
+        if song_album in sel_al: score += 1.5
+            
+        # 4. Starred/Favorited Boost (+1.0)
+        if s.get("starred"):
+            score += 1.0
 
-        # 3. Context Matches (Weight 5.0)
-        if song_id in ctx_ids or any(a in ctx_a for a in song_artists) or song_genre in ctx_g or song_album in ctx_al:
-            score += 5.0
-            is_candidate = True
-            
-        # 4. LLM Selected Matches (Weight 2.0)
-        if any(a in sel_a for a in song_artists) or song_genre in sel_g or song_album in sel_al:
-            score += 2.0
-            is_candidate = True
-            
-        if is_candidate:
-            # Starred boost for candidates (+0.5)
-            if s.get("starred"):
-                score += 0.5
-                
+        # 5. Semantic Vibe Matches (+0.5)
+        if song_id in sem_ids:
+            score += 0.5
+
+        if score > 0:
             s_copy = s.copy()
             s_copy["_relevance_score"] = score
             filtered.append(s_copy)
@@ -420,6 +424,7 @@ def generate_playlist_single_call(
             "You are a playlist-builder AI.\n"
             "Rules:\n"
             f"• {random.choice(diversity_options)}\n"
+            "• Maintain high artist and album diversity. Do NOT cluster multiple tracks from the same album unless the prompt explicitly justifies an album-focused selection.\n"
             "• Ensure healthy artist/genre mix.\n"
             "• Return exactly ONE JSON object like:\n"
             '  {"playlist": [{"id": "...", "title": "..."}, ...]}\n'
@@ -790,30 +795,37 @@ def _sanitize_playlist(entries: List[dict], candidates: List[dict], fuzzy_thresh
 
 STOPWORDS = {'and', 'but', 'mix', 'the', 'a', 'an', 'of', 'in', 'on', 'for', 'to', 'from', 'by', 'with', 'at', 'as', 'is', 'it', 'or', 'vs', 'feat', 'featuring'}
 
-def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: list[str]) -> dict:
+def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: list[str], all_albums: list[str]) -> dict:
     """
-    Extract artists and genres mentioned in the prompt using smart partial matching.
+    Extract artists, genres, and albums mentioned in the prompt using smart partial matching.
     Handles partial names like 'gambino' -> 'Childish Gambino'.
-    Returns a dict with keys: 'artists', 'genres'.
+    Returns a dict with keys: 'artists', 'genres', 'albums'.
     """
-    entities = {'artists': [], 'genres': []}
+    entities = {'artists': [], 'genres': [], 'albums': []}
     
     # Clean prompt: remove stopwords and punctuation, split into words
     prompt_lc = prompt.lower()
     stopwords = {'and', 'the', 'a', 'an', 'of', 'in', 'on', 'for', 'to', 'from', 'by', 'with', 'at', 'as', 'is', 'it', 'or'}
     prompt_words = set(re.findall(r'\b\w+\b', prompt_lc)) - stopwords
     
+    # Helper to check matches in prompt
+    def check_matches(items, key):
+        for item in items:
+            item_lc = item.lower()
+            item_words = set(re.findall(r'\b\w+\b', item_lc)) - stopwords
+            
+            # Exact match (full item name in prompt)
+            if item_lc in prompt_lc:
+                entities[key].append(item)
+            # Partial match (any significant word from item name in prompt)
+            elif item_words and item_words & prompt_words:  # Intersection
+                entities[key].append(item)
+
     # Artists: check both exact and partial matches
-    for artist in all_artists:
-        artist_lc = artist.lower()
-        artist_words = set(re.findall(r'\b\w+\b', artist_lc)) - stopwords
-        
-        # Exact match (full artist name in prompt)
-        if artist_lc in prompt_lc:
-            entities['artists'].append(artist)
-        # Partial match (any significant word from artist name in prompt)
-        elif artist_words & prompt_words:  # Intersection
-            entities['artists'].append(artist)
+    check_matches(all_artists, 'artists')
+    
+    # Albums: check both exact and partial matches
+    check_matches(all_albums, 'albums')
     
     # Genres: exact match only (genres are typically single words or short phrases)
     for genre in all_genres:
@@ -906,12 +918,10 @@ def _main_impl(args):
         context_albums = list(dict.fromkeys(context_albums))
     
     # Extract explicit mentions from prompt
-    prompt_entities = extract_prompt_entities(prompt, all_artists, all_genres)
+    prompt_entities = extract_prompt_entities(prompt, all_artists, all_genres, all_albums)
     explicit_artists = prompt_entities['artists']
     explicit_genres = prompt_entities['genres']
-    
-    # For albums, we'll track context albums separately (no explicit album extraction yet)
-    explicit_albums = []
+    explicit_albums = prompt_entities['albums']
     
     print(f"Context analysis complete ({time.time()-start_t:.1f}s)")
     
