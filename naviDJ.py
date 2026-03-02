@@ -260,23 +260,13 @@ def select_focus_metadata_single_call(
     system_msg = {
         "role": "system",
         "content": (
-            "You are a music metadata curator. Your task is to select focused metadata items for a given vibe prompt.\n"
-            "You MUST select items EXACTLY as they appear in the provided lists. Do NOT modify capitalization, spelling, or formatting.\n"
-            "Return ONLY items that exist in the library.\n\n"
-            "Selection targets:\n"
-            "- Artists: Exactly 5 artists that fit the vibe\n"
-            "- Genres: Exactly 10 relevant genres\n"
-            "- Albums: Exactly 5 representative albums\n\n"
-            "Return ONLY valid JSON in this exact format:\n"
-            '{\n'
-            '  "artists": ["artist1", "artist2", ...],\n'
-            '  "genres": ["genre1", "genre2", ...],\n'
-            '  "albums": ["album1", "album2", ...]\n'
-            '}\n\n'
+            "You are a music metadata curator. Select metadata for a vibe prompt.\n"
+            "Reasoning: low\n\n"
             "Rules:\n"
-            "- ONLY select from the provided lists. Do NOT invent new items.\n"
-            "- Use the EXACT string representation.\n"
-            "- If the prompt explicitly mentions an item, ALWAYS include it if it exists."
+            "- Select ONLY items that exist exactly in the provided lists.\n"
+            "- Return ONLY valid JSON, no extra text:\n"
+            '{"artists": [...], "genres": [...], "albums": [...]}\n'
+            "- artists: exactly 5, genres: exactly 10, albums: exactly 5."
         ),
     }
     
@@ -422,15 +412,14 @@ def generate_playlist_single_call(
         "role": "system",
         "content": (
             "You are a playlist-builder AI.\n"
+            "Reasoning: low\n\n"
             "Rules:\n"
-            f"• {random.choice(diversity_options)}\n"
-            "• Maintain high artist and album diversity. Do NOT cluster multiple tracks from the same album unless the prompt explicitly justifies an album-focused selection.\n"
-            "• Ensure healthy artist/genre mix.\n"
-            "• Return exactly ONE JSON object like:\n"
-            '  {"playlist": [{"id": "...", "title": "..."}, ...]}\n'
-            f"• Include exactly {min_songs} songs.\n"
-            "• Use ONLY the IDs and titles provided below.\n"
-            "• Do NOT wrap in triple-backticks. Respond with JSON ONLY."
+            f"- Return exactly {min_songs} songs.\n"
+            "- Use ONLY the provided IDs and titles.\n"
+            "- Maximize artist and album diversity.\n"
+            f"- {random.choice(diversity_options)}\n"
+            "- Return ONLY valid JSON: "
+            '{"playlist": [{"id": "...", "title": "..."}, ...]}'
         ),
     }
     
@@ -698,11 +687,9 @@ def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], a
         "role": "system",
         "content": (
             "You are a playlist-builder AI.\n"
-            "Rules:\n"
-            "  - Reply with a single JSON object exactly like: {\"playlist_name\": \"Chosen Playlist\"}\n"
-            "  - If none are relevant, reply with an empty object: {}\n"
-            "  - Do not return comments, arrays, or extra keys.\n"
-            "  - Your entire reply must be valid JSON. Do not wrap in backticks."
+            "Reasoning: low\n\n"
+            "Pick the single most relevant playlist for the given vibe.\n"
+            'Return ONLY valid JSON: {"playlist_name": "Name"} or {} if none fit.'
         ),
     }
     user_msg = {
