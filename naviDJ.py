@@ -31,6 +31,7 @@ from tqdm import tqdm
 from openai import OpenAI
 import argparse
 from typing import List, Dict  # optional, only for type hints
+from collections import Counter
 import configparser
 from rapidfuzz import fuzz
 import logging
@@ -87,18 +88,19 @@ def _remove_think_tags(text: str) -> str:
 def _split_artist_string(artist_string: str) -> list[str]:
     """
     Split a complex artist string into individual artist names.
-    Handles various delimiters: ",", ".", ";", "feat.", "featuring", etc.
+    Handles various delimiters: ",", ";", "•", "&", "feat.", "featuring", "ft.", etc.
     Returns a list of cleaned individual artist names.
     """
     if not artist_string:
         return []
     
-    # Normalize common delimiters
-    normalized = artist_string.replace(",", ",").replace(";", ",").replace("feat.", ",").replace("featuring", ",")
+    import re
+    # Split on comma, semicolon, bullet point, or specific words surrounded by whitespace
+    pattern = r',|;|•|\s+&\s+|\s+feat\.?\s+|\s+featuring\s+|\s+ft\.?\s+'
+    parts = re.split(pattern, artist_string, flags=re.IGNORECASE)
     
-    # Split by comma and clean each part
     artists = []
-    for part in normalized.split(","):
+    for part in parts:
         artist = part.strip()
         if artist and artist not in artists:  # Avoid duplicates
             artists.append(artist)
@@ -353,6 +355,7 @@ def filter_library_by_metadata(
 ) -> list[dict]:
     """
     Filter library based on combined focus items with hierarchical, additive weighting.
+    Note that context playlist songs are used only as a vibe/metadata signal and are not scored for direct inclusion.
     """
     # Create sets for efficient lookup
     exp_a = set(explicit_artists)
@@ -387,26 +390,23 @@ def filter_library_by_metadata(
         if song_album in exp_al: score += 3.0
             
         # 2. Context Playlist Matches
-        # Explicitly in context playlist (+4.0)
-        if song_id in ctx_ids:
-            score += 4.0
-        # Metadata matches if part of context (+2.0 each)
-        if any(a in ctx_a for a in song_artists): score += 2.0
-        if song_genre in ctx_g: score += 2.0
-        if song_album in ctx_al: score += 2.0
+        # Metadata matches if part of context
+        if any(a in ctx_a for a in song_artists): score += 1.0
+        if song_genre in ctx_g: score += 1.5
+        if song_album in ctx_al: score += 0.75
             
-        # 3. LLM Chosen Focus Matches (+1.5 each)
+        # 3. LLM Chosen Focus Matches
         if any(a in sel_a for a in song_artists): score += 1.5
         if song_genre in sel_g: score += 1.5
-        if song_album in sel_al: score += 1.5
+        if song_album in sel_al: score += 1.0
             
         # 4. Starred/Favorited Boost (+1.0)
         if s.get("starred"):
             score += 1.0
 
-        # 5. Semantic Vibe Matches (+0.5)
+        # 5. Semantic Vibe Matches (+1.0)
         if song_id in sem_ids:
-            score += 0.5
+            score += 1.0
 
         if score > 0:
             s_copy = s.copy()
@@ -735,10 +735,54 @@ def extract_prompt_artists(prompt: str, all_artists: list[str]) -> list[str]:
 # CONTEXT PLAYLIST SELECTION
 # --------------------------------------------------
 
-def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], all_songs: list[dict]) -> list[dict]:
-    """Ask the LLM to pick ONE playlist by name using a strict JSON contract. Returns JSON-only; caller can safely json.loads() the result."""
+def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], all_songs: list[dict], embedding_manager=None) -> list[dict]:
+    """
+    Select ONE playlist for context. If embedding_manager is provided, uses semantic similarity against
+    playlist composition string. Otherwise asks the LLM to pick ONE playlist by name.
+    """
     if not existing_playlists:
         return []
+
+    if embedding_manager is not None:
+        descriptions = []
+        for pl in existing_playlists:
+            name = pl.get("name", "")
+            description = pl.get("comment", "")
+            artist_counts = Counter()
+            genre_counts = Counter()
+            for song in pl.get("songs", []):
+                if song.get("artist"):
+                    for a in _split_artist_string(song["artist"]):
+                        artist_counts[a] += 1
+                if song.get("genre"):
+                    genre_counts[song["genre"]] += 1
+            top_artists = [a for a, _ in artist_counts.most_common(8)]
+            top_genres = [g for g, _ in genre_counts.most_common(4)]
+            desc_str = f"{name} | {description} | {', '.join(top_artists)} | {', '.join(top_genres)}"
+            descriptions.append(desc_str)
+            
+        prompt_emb = embedding_manager.get_embedding(prompt)
+        pl_embs = embedding_manager.get_embeddings_batch(descriptions)
+        
+        best_score = -2.0
+        best_idx = -1
+        for i, emb in enumerate(pl_embs):
+            if emb is not None and prompt_emb is not None:
+                score = embedding_manager._cosine_similarity(prompt_emb, emb)
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+                    
+        if best_score < 0.15 or best_idx == -1:
+            print("No context playlist deemed semantically relevant enough (score < 0.15).")
+            return []
+            
+        best_pl = existing_playlists[best_idx]
+        print(f"Using context playlist '{best_pl['name']}' (semantic score: {best_score:.3f}).")
+        
+        id_map = {s["id"]: s for s in all_songs}
+        return [id_map[s["id"]] for s in best_pl["songs"] if s["id"] in id_map]
+
     playlist_names = [pl["name"] for pl in existing_playlists]
     playlists_json = json.dumps(playlist_names).replace("```", "`\u200c`\u200c`")
     sys_msg = {
@@ -935,7 +979,17 @@ def _main_impl(args):
         print("Performing semantic metadata pre-selection...")
         sem_artists = embedding_manager.find_similar(prompt, all_artists, top_k=40)
         sem_genres = embedding_manager.find_similar(prompt, all_genres, top_k=40)
-        sem_albums = embedding_manager.find_similar(prompt, all_albums, top_k=40)
+        
+        album_artist_map = {}
+        for s in all_songs:
+            al = s.get('album')
+            ar = s.get('artist')
+            if al and isinstance(al, str) and al not in album_artist_map:
+                album_artist_map[al] = ar
+                
+        album_texts = [f"{al} by {album_artist_map[al]}" if album_artist_map.get(al) else al for al in all_albums]
+        sem_album_indices = embedding_manager.find_similar_indices(prompt, album_texts, top_k=40)
+        sem_albums = [all_albums[i] for i in sem_album_indices]
         
         # 2. Semantic Song Pre-selection (Top 200)
         print("Finding semantically similar songs...")
@@ -950,23 +1004,28 @@ def _main_impl(args):
     # ========== CONTEXT ANALYSIS ==========
     start_t = time.time()
     existing_playlists = fetch_all_playlists(exclude_name=playlist_name)
-    context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs)
+    context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs, embedding_manager=embedding_manager)
     
-    # Extract metadata from context
+    # Extract metadata from context (Top N most frequent)
     context_artists = []
     context_genres = []
     context_albums = []
     if context_songs:
+        art_counts = Counter()
+        gen_counts = Counter()
+        alb_counts = Counter()
         for s in context_songs:
             if s.get("artist"):
-                context_artists.extend(_split_artist_string(s["artist"]))
+                for a in _split_artist_string(s["artist"]):
+                    art_counts[a] += 1
             if s.get("genre"):
-                context_genres.append(s["genre"])
+                gen_counts[s["genre"]] += 1
             if s.get("album"):
-                context_albums.append(s["album"])
-        context_artists = list(dict.fromkeys(context_artists))
-        context_genres = list(dict.fromkeys(context_genres))
-        context_albums = list(dict.fromkeys(context_albums))
+                alb_counts[s["album"]] += 1
+        
+        context_artists = [a for a, _ in art_counts.most_common(10)]
+        context_genres = [g for g, _ in gen_counts.most_common(5)]
+        context_albums = [al for al, _ in alb_counts.most_common(5)]
     
     # Extract explicit mentions from prompt
     prompt_entities = extract_prompt_entities(prompt, all_artists, all_genres, all_albums)
@@ -983,12 +1042,35 @@ def _main_impl(args):
 
     # ========== STAGE 1: METADATA SELECTION ==========
     start_t = time.time()
-    selected_metadata = select_focus_metadata_single_call(
-        prompt=prompt,
-        all_artists=sem_artists,
-        all_genres=sem_genres,
-        all_albums=sem_albums
-    )
+    if embedding_manager is not None:
+        print("Skipping LLM metadata selection; using semantically derived candidates.")
+        
+        # Determine focus artists (explicitly requested + top 5 semantic)
+        focus_artists = list(dict.fromkeys(explicit_artists + sem_artists[:5]))
+        
+        # Inject albums from these focus artists
+        focus_albums = []
+        for al, ar in album_artist_map.items():
+            if ar:
+                ar_split = _split_artist_string(ar)
+                if any(fa in ar_split for fa in focus_artists):
+                    focus_albums.append(al)
+        
+        combined_albums = list(dict.fromkeys(focus_albums + sem_albums))
+        
+        selected_metadata = {
+            "artists": list(dict.fromkeys(explicit_artists + sem_artists))[:15],
+            "genres": sem_genres[:15],
+            "albums": combined_albums[:15]
+        }
+    else:
+        print("Using LLM for metadata selection...")
+        selected_metadata = select_focus_metadata_single_call(
+            prompt=prompt,
+            all_artists=sem_artists,
+            all_genres=sem_genres,
+            all_albums=sem_albums
+        )
     
     duration = time.time() - start_t
     
