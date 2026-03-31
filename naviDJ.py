@@ -76,11 +76,12 @@ embedding_manager: EmbeddingManager | None = None
 # HELPER FOR CLEANING LLM OUTPUT
 # --------------------------------------------------
 
-_THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
+# Matches closed <think>...</think> blocks (including multiline)
+_THINK_CLOSED_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 
 def _remove_think_tags(text: str) -> str:
     """Strip <think>...</think> blocks (Ollama 'thinking' traces) and trim whitespace."""
-    return _THINK_RE.sub("", text).strip()
+    return _THINK_CLOSED_RE.sub("", text).strip()
 
 
 def _split_artist_string(artist_string: str) -> list[str]:
@@ -201,13 +202,26 @@ def fetch_all_subsonic_songs() -> list[dict]:
 # LLM UTILITIES - artist and genre selection
 # --------------------------------------------------
 
-def _llm_chat(messages: list[dict]) -> str:
+def _llm_chat(messages: list[dict], _retries: int = 1) -> str:
     """Universal chat helper that works for both OpenAI & Ollama and always returns clean JSON-only content."""
+
+    # Sanitize: every message content field must be a plain string.
+    # Models that emit <think> blocks or return None content will cause
+    # "Content path must be a string" crashes in the OpenAI client otherwise.
+    safe_messages = []
+    for msg in messages:
+        m = dict(msg)  # shallow copy
+        c = m.get("content")
+        if c is None:
+            m["content"] = ""
+        elif not isinstance(c, str):
+            m["content"] = json.dumps(c) if isinstance(c, (dict, list)) else str(c)
+        safe_messages.append(m)
 
     try:
         resp = client.chat.completions.create(
             model=LLM_MODEL,
-            messages=messages,
+            messages=safe_messages,
             stream=False,
             response_format={"type": "json_object"}
         )
@@ -215,20 +229,38 @@ def _llm_chat(messages: list[dict]) -> str:
         # Fallback for older openai-python or backends that don't know `response_format`.
         resp = client.chat.completions.create(
             model=LLM_MODEL,
-            messages=messages,
+            messages=safe_messages,
             stream=False,
         )
-        
-    content = resp.choices[0].message.content
+
+    if resp is None or not resp.choices:
+        raise RuntimeError(f"LLM returned an empty response (model={LLM_MODEL}, mode={LLM_MODE}). "
+                           "Check that the model is loaded and the backend is reachable.")
+
+    content = resp.choices[0].message.content or ""
+
+    # --- Step 1: strip ALL think blocks FIRST before any further processing ---
     content = _remove_think_tags(content)
-    
-    # Robustly find the JSON object if it's buried in text
+
+    # Retry once if the model returned empty content (transient Ollama issue)
+    if not content.strip() and _retries > 0:
+        print(f"[WARN] LLM returned empty content (model={LLM_MODEL}), retrying...")
+        time.sleep(1)
+        return _llm_chat(messages, _retries=_retries - 1)
+
+    # --- Step 2: extract JSON object {...} buried in surrounding prose ---
+    # We are STICKY here; if the LLM adds preamble, we strip it.
     if "{" in content and "}" in content:
         start = content.find("{")
         end = content.rfind("}") + 1
         content = content[start:end]
-        
-    return content
+    # --- Step 3: or extract JSON array [...] if no object found ---
+    elif "[" in content and "]" in content:
+        start = content.find("[")
+        end = content.rfind("]") + 1
+        content = content[start:end]
+
+    return content.strip()
 
 
 def _strip_fences(text: str) -> str:
@@ -264,9 +296,10 @@ def select_focus_metadata_single_call(
             "Reasoning: low\n\n"
             "Rules:\n"
             "- Select ONLY items that exist exactly in the provided lists.\n"
-            "- Return ONLY valid JSON, no extra text:\n"
+            "- STRICTLY return ONLY valid JSON, no extra text, no markdown formatting:\n"
             '{"artists": [...], "genres": [...], "albums": [...]}\n'
-            "- artists: exactly 5, genres: exactly 10, albums: exactly 5."
+            "- artists: exactly 5, genres: exactly 10, albums: exactly 5.\n"
+            "- No preamble, no postamble, no explanation. Just the JSON."
         ),
     }
     
@@ -282,18 +315,26 @@ def select_focus_metadata_single_call(
     
     raw = _llm_chat([system_msg, user_msg])
     raw = _clean_json(_strip_fences(raw))
-    
-    try:
-        parsed = json.loads(raw)
-        result = {
+
+    def _parse_metadata(text):
+        parsed = json.loads(text)
+        return {
             "artists": [x for x in parsed.get("artists", []) if x in all_artists],
-            "genres": [x for x in parsed.get("genres", []) if x in all_genres],
-            "albums": [x for x in parsed.get("albums", []) if x in all_albums]
+            "genres":  [x for x in parsed.get("genres",  []) if x in all_genres],
+            "albums":  [x for x in parsed.get("albums",  []) if x in all_albums],
         }
-        
-        return result
-    except Exception as e:
-        print(f"[ERROR] Metadata selection failed: {e}")
+
+    try:
+        return _parse_metadata(raw)
+    except Exception as primary_err:
+        # Backup: try to find any JSON object in the original raw response
+        fallback_match = re.search(r'\{[\s\S]*\}', raw)
+        if fallback_match:
+            try:
+                return _parse_metadata(_clean_json(fallback_match.group(0)))
+            except Exception:
+                pass
+        print(f"[WARN] Metadata selection parse failed ({primary_err}); using top defaults.")
         return {"artists": all_artists[:10], "genres": all_genres[:15], "albums": all_albums[:5]}
 
 def filter_library_by_metadata(
@@ -391,80 +432,97 @@ def generate_playlist_single_call(
     explicit_artists: list[str] = None
 ) -> list[dict]:
     """
-    Generate playlist with a single LLM call. Improved parsing and fallback.
+    Generate playlist with a single LLM call.
+
+    Uses compact numbered-line input and number-only JSON output to minimise
+    LLM output tokens.  A Python-side numbering table maps the returned pick
+    numbers back to full song dicts (id, title) so the LLM never has to
+    reproduce IDs or exact titles.
     """
-    explicit_artist_str = ", ".join(explicit_artists or [])
-    
-    # Prepare songs (simplified for LLM to avoid context bloat)
-    songs_for_llm = [
-        {"id": s["id"], "title": s["title"], "artist": s.get("artist", "Unknown")}
-        for s in filtered_songs
-    ]
-    songs_json = json.dumps(songs_for_llm)
-    
+    # -- 1. Build local numbering table (never sent to LLM) ----------------
+    num_to_song = {i + 1: s for i, s in enumerate(filtered_songs)}
+
+    # -- 2. Build compact candidate lines for the LLM ---------------------
+    lines = []
+    for n, s in num_to_song.items():
+        star = "*" if s.get("starred") else ""
+        title   = s.get("title")   or "Unknown"
+        artist  = s.get("artist")  or "Unknown"
+        genre   = s.get("genre")   or "Unknown"
+        album   = s.get("album")   or "Unknown"
+        year    = s.get("releaseYear") or "Unknown"
+        lines.append(f"{n}{star}|{title}|{artist}|{genre}|{album}|{year}")
+    candidate_text = "\n".join(lines)
+
+    # -- 3. System prompt --------------------------------------------------
     diversity_options = [
         "Slightly prefer starred songs if they fit.",
         "Ensure artist diversity unless specific artists were requested.",
         "Create a cohesive flow between tracks."
     ]
-
     system_msg = {
         "role": "system",
         "content": (
             "You are a playlist-builder AI.\n"
             "Reasoning: low\n\n"
+            "You will receive a numbered list of candidate songs. "
+            "A number followed by * means the user has starred/favorited that song.\n"
             "Rules:\n"
-            f"- Return exactly {min_songs} songs.\n"
-            "- Use ONLY the provided IDs and titles.\n"
+            f"- Select exactly {min_songs} songs.\n"
+            "- Pick ONLY numbers that appear in the provided list.\n"
             "- Maximize artist and album diversity.\n"
             f"- {random.choice(diversity_options)}\n"
-            "- Return ONLY valid JSON: "
-            '{"playlist": [{"id": "...", "title": "..."}, ...]}'
+            "- STRICTLY return ONLY a JSON object with a single key \"picks\" whose value "
+            "is an array of the selected candidate numbers (integers). Example:\n"
+            '  {"picks": [3, 12, 44, 1, 27]}\n'
+            "- Numbers only. No titles, no extra keys, no explanation, no markdown fences."
         ),
     }
-    
+
+    # -- 4. User message ----------------------------------------------------
     user_msg = {
         "role": "user",
-        "content": f"Vibe: {prompt}\n\nAvailable Songs:\n{songs_json}"
+        "content": f"Vibe: {prompt}\n\nCandidates:\n{candidate_text}",
     }
-    
+
     raw = _strip_fences(_llm_chat([system_msg, user_msg]))
-    
+
+    # -- 5. Post-process: map picks back to song dicts ---------------------
+    def _resolve_picks(picks):
+        """Convert a list of raw pick values to playlist dicts, skipping invalid entries."""
+        playlist = []
+        seen_ids = set()
+        for p in picks:
+            try:
+                num = int(p)
+            except (TypeError, ValueError):
+                continue
+            if num in num_to_song and num_to_song[num]["id"] not in seen_ids:
+                song = num_to_song[num]
+                playlist.append({"id": song["id"], "title": song["title"]})
+                seen_ids.add(song["id"])
+        return playlist
+
+    picks = []
     try:
         parsed = json.loads(raw)
-        picked = parsed.get("playlist", [])
-        if not picked and isinstance(parsed, list):
-            picked = parsed
+        picks = parsed.get("picks", []) if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+    except Exception:
+        # --- Backup: regex-extract all integers from the raw response ---
+        extracted = re.findall(r'\b(\d+)\b', raw)
+        if extracted:
+            print(f"[WARN] JSON parse failed for playlist; extracted {len(extracted)} integers via regex fallback.")
+            picks = extracted
+        else:
+            print(f"[ERROR] Playlist generation failed: could not parse response. Raw: {raw[:150]}")
 
-        # Resolve IDs (robust matching)
-        id_to_song = {s["id"]: s for s in filtered_songs}
-        playlist = []
-        for item in picked:
-            if isinstance(item, str): # Just an ID
-                sid = item
-            else: # Dictionary
-                sid = item.get("id")
-            
-            if sid and sid in id_to_song:
-                playlist.append({"id": sid, "title": id_to_song[sid]["title"]})
-            else:
-                # Try title match as fallback
-                title = item.get("title", "").lower() if isinstance(item, dict) else ""
-                if title:
-                    for s in filtered_songs:
-                        if s["title"].lower() == title:
-                            playlist.append({"id": s["id"], "title": s["title"]})
-                            break
-        
-        # Pad if needed
-        if len(playlist) < min_songs:
-            playlist = ensure_min_songs(playlist, filtered_songs, min_songs)
-            
-        return playlist
-        
-    except Exception as e:
-        print(f"[ERROR] Playlist generation failed: {e}. Raw: {raw[:100]}")
-        return [{"id": s["id"], "title": s["title"]} for s in filtered_songs[:min_songs]]
+    playlist = _resolve_picks(picks)
+
+    # Pad if needed
+    if len(playlist) < min_songs:
+        playlist = ensure_min_songs(playlist, filtered_songs, min_songs)
+
+    return playlist
 
 
 def generate_playlist_chunked(
@@ -689,7 +747,8 @@ def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], a
             "You are a playlist-builder AI.\n"
             "Reasoning: low\n\n"
             "Pick the single most relevant playlist for the given vibe.\n"
-            'Return ONLY valid JSON: {"playlist_name": "Name"} or {} if none fit.'
+            "STRICTLY return ONLY valid JSON: {\"playlist_name\": \"Name\"} or {} if none fit.\n"
+            "No preamble, no postamble, no markdown formatting."
         ),
     }
     user_msg = {
@@ -700,12 +759,18 @@ def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], a
         ),
     }
     raw = _strip_fences(_llm_chat([sys_msg, user_msg]))
+    playlist_name = ""
     try:
         parsed = json.loads(raw)
         playlist_name = parsed.get("playlist_name", "").strip()
-    except Exception as e:
-        print(f"WARNING: JSON parse error - {e}. Raw start: {raw[:120]}")
-        playlist_name = ""
+    except Exception as primary_err:
+        # Backup: look for a quoted string after 'playlist_name'
+        m = re.search(r'playlist_name["\s:]+(["\'])(.+?)\1', raw)
+        if m:
+            playlist_name = m.group(2).strip()
+            print(f"[WARN] Context playlist JSON parse failed; extracted name via regex: '{playlist_name}'")
+        else:
+            print(f"[WARN] Context playlist JSON parse failed ({primary_err}). Raw: {raw[:120]}")
     if not playlist_name:
         return []
 
@@ -792,14 +857,13 @@ def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: lis
     
     # Clean prompt: remove stopwords and punctuation, split into words
     prompt_lc = prompt.lower()
-    stopwords = {'and', 'the', 'a', 'an', 'of', 'in', 'on', 'for', 'to', 'from', 'by', 'with', 'at', 'as', 'is', 'it', 'or'}
-    prompt_words = set(re.findall(r'\b\w+\b', prompt_lc)) - stopwords
+    prompt_words = set(re.findall(r'\b\w+\b', prompt_lc)) - STOPWORDS
     
     # Helper to check matches in prompt
     def check_matches(items, key):
         for item in items:
             item_lc = item.lower()
-            item_words = set(re.findall(r'\b\w+\b', item_lc)) - stopwords
+            item_words = set(re.findall(r'\b\w+\b', item_lc)) - STOPWORDS
             
             # Exact match (full item name in prompt)
             if item_lc in prompt_lc:
