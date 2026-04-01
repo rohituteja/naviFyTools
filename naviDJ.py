@@ -221,14 +221,21 @@ def _llm_chat(messages: list[dict], _retries: int = 1) -> str:
         safe_messages.append(m)
 
     try:
-        resp = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=safe_messages,
-            stream=False,
-            response_format={"type": "json_object"}
-        )
+        if LLM_MODE == "openai":
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=safe_messages,
+                stream=False,
+                response_format={"type": "json_object"}
+            )
+        else:
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=safe_messages,
+                stream=False,
+            )
     except Exception:
-        # Fallback for older openai-python or backends that don't know `response_format`.
+        # Fallback for older openai-python or backends that crash with response_format
         resp = client.chat.completions.create(
             model=LLM_MODEL,
             messages=safe_messages,
@@ -240,18 +247,28 @@ def _llm_chat(messages: list[dict], _retries: int = 1) -> str:
                            "Check that the model is loaded and the backend is reachable.")
 
     content = resp.choices[0].message.content or ""
+    
+    # Debug: show raw content so we can see what the model actually returned
+    logging.debug(f"[LLM RAW] len={len(content)} | first 300 chars: {content[:300]!r}")
+    if not content.strip():
+        # Also check reasoning_content in case the server separates think from answer
+        reasoning = getattr(resp.choices[0].message, "reasoning_content", None) or ""
+        if reasoning:
+            logging.debug(f"[LLM] content empty but reasoning_content present (len={len(reasoning)}); model may have only generated a think block")
 
     # --- Step 1: strip ALL think blocks FIRST before any further processing ---
     content = _remove_think_tags(content)
+    
+    # Also strip unclosed <think> blocks (model hit token limit mid-think)
+    content = re.sub(r'<think>[\s\S]*$', '', content, flags=re.IGNORECASE).strip()
 
-    # Retry once if the model returned empty content (transient Ollama issue)
+    # Retry once if the model returned empty content
     if not content.strip() and _retries > 0:
         print(f"[WARN] LLM returned empty content (model={LLM_MODEL}), retrying...")
         time.sleep(1)
         return _llm_chat(messages, _retries=_retries - 1)
 
     # --- Step 2: extract JSON object {...} buried in surrounding prose ---
-    # We are STICKY here; if the LLM adds preamble, we strip it.
     if "{" in content and "}" in content:
         start = content.find("{")
         end = content.rfind("}") + 1
@@ -455,11 +472,6 @@ def generate_playlist_single_call(
     candidate_text = "\n".join(lines)
 
     # -- 3. System prompt --------------------------------------------------
-    diversity_options = [
-        "Slightly prefer starred songs if they fit.",
-        "Ensure artist diversity unless specific artists were requested.",
-        "Create a cohesive flow between tracks."
-    ]
     system_msg = {
         "role": "system",
         "content": (
@@ -471,7 +483,8 @@ def generate_playlist_single_call(
             f"- Select exactly {min_songs} songs.\n"
             "- Pick ONLY numbers that appear in the provided list.\n"
             "- Maximize artist and album diversity.\n"
-            f"- {random.choice(diversity_options)}\n"
+            "- Slightly prefer starred songs if they fit.\n"
+            "- Ensure artist diversity unless specific artists were requested.\n"
             "- STRICTLY return ONLY a JSON object with a single key \"picks\" whose value "
             "is an array of the selected candidate numbers (integers). Example:\n"
             '  {"picks": [3, 12, 44, 1, 27]}\n'
