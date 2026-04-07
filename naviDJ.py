@@ -38,7 +38,6 @@ import logging
 from embeddings import EmbeddingManager
 
 
-
 # --------------------------------------------------
 # CONFIG & LLM CLIENT SETUP
 # --------------------------------------------------
@@ -80,6 +79,7 @@ embedding_manager: EmbeddingManager | None = None
 # Matches closed <think>...</think> blocks (including multiline)
 _THINK_CLOSED_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 
+
 def _remove_think_tags(text: str) -> str:
     """Strip <think>...</think> blocks (Ollama 'thinking' traces) and trim whitespace."""
     return _THINK_CLOSED_RE.sub("", text).strip()
@@ -93,19 +93,43 @@ def _split_artist_string(artist_string: str) -> list[str]:
     """
     if not artist_string:
         return []
-    
-    import re
     # Split on comma, semicolon, bullet point, or specific words surrounded by whitespace
-    pattern = r',|;|•|\s+&\s+|\s+feat\.?\s+|\s+featuring\s+|\s+ft\.?\s+'
+    pattern = r",|;|•|\s+&\s+|\s+feat\.?\s+|\s+featuring\s+|\s+ft\.?\s+"
     parts = re.split(pattern, artist_string, flags=re.IGNORECASE)
-    
+
     artists = []
     for part in parts:
         artist = part.strip()
         if artist and artist not in artists:  # Avoid duplicates
             artists.append(artist)
-    
+
     return artists
+
+
+
+
+def calculate_metadata_score(song: dict) -> float:
+    """Calculate score from play count, skip count, and recency."""
+    score = 0.0
+
+    # 1. Play count bonus: +0.1 for each 7 plays
+    play_count = song.get("playCount", 0)
+    if play_count > 0:
+        score += 0.1 * (play_count // 7)
+
+    # 2. Skip count penalty: -0.1 for each 5 skips above 5
+    skip_count = song.get("skipCount", 0)
+    if skip_count > 5:
+        score -= 0.1 * ((skip_count - 1) // 5)
+
+    # 3. Recency penalty: -0.25 if played within last 48 hours
+    last_play = song.get("lastPlayTime", 0)
+    if last_play > 0:
+        if last_play > (time.time() - 172800):  # < 48 hours = 172800 seconds
+            score -= 0.25
+
+    return score
+
 
 def configure_llm(mode: str = None, model: str = None) -> None:
     """Initialise the global `client`, `LLM_MODE`, and `LLM_MODEL` based on *mode* and *model*."""
@@ -113,46 +137,55 @@ def configure_llm(mode: str = None, model: str = None) -> None:
 
     # Use secrets.txt defaults if not provided
     mode = (mode or DEFAULT_LLM_MODE or "openai").lower()
-    
+
     # Reload secrets to get latest config (important for frontend updates)
     secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 
     if mode not in {"openai", "ollama", "custom"}:
-        raise ValueError("Unsupported LLM_MODE. Choose 'openai', 'ollama', or 'custom'.")
+        raise ValueError(
+            "Unsupported LLM_MODE. Choose 'openai', 'ollama', or 'custom'."
+        )
 
     LLM_MODE = mode
 
     if mode == "openai":
         LLM_MODEL = model or DEFAULT_LLM_MODEL or "gpt-4o-mini"
-        EMBEDDING_MODEL = secrets.get("openai", "embedding_model", fallback="text-embedding-3-small")
+        EMBEDDING_MODEL = secrets.get(
+            "openai", "embedding_model", fallback="text-embedding-3-small"
+        )
         client = OpenAI(api_key=DEFAULT_OPENAI_KEY)
         embedding_manager = EmbeddingManager(
-            api_type="openai",
-            model_name=EMBEDDING_MODEL,
-            api_key=DEFAULT_OPENAI_KEY
+            api_type="openai", model_name=EMBEDDING_MODEL, api_key=DEFAULT_OPENAI_KEY
         )
     elif mode == "ollama":
-        LLM_MODEL = model or DEFAULT_LLM_MODEL or "gemma3n:latest" 
-        EMBEDDING_MODEL = secrets.get("ollama", "embedding_model", fallback="nomic-embed-text:latest")
+        LLM_MODEL = model or DEFAULT_LLM_MODEL or "gemma3n:latest"
+        EMBEDDING_MODEL = secrets.get(
+            "ollama", "embedding_model", fallback="nomic-embed-text:latest"
+        )
         client = OpenAI(api_key=DEFAULT_OLLAMA_API_KEY, base_url=DEFAULT_OLLAMA_BASE)
         embedding_manager = EmbeddingManager(
             api_type="ollama",
             model_name=EMBEDDING_MODEL,
             base_url=DEFAULT_OLLAMA_BASE,
-            api_key=DEFAULT_OLLAMA_API_KEY
+            api_key=DEFAULT_OLLAMA_API_KEY,
         )
     else:  # custom
         LLM_MODEL = model or DEFAULT_LLM_MODEL or "gpt-4o-mini"
-        client = OpenAI(api_key=DEFAULT_CUSTOM_API_KEY, base_url=DEFAULT_CUSTOM_BASE_URL)
+        client = OpenAI(
+            api_key=DEFAULT_CUSTOM_API_KEY, base_url=DEFAULT_CUSTOM_BASE_URL
+        )
         embedding_manager = None
+
 
 # --------------------------------------------------
 # SUBSONIC HELPERS
 # --------------------------------------------------
 
+
 def fetch_starred_ids() -> set[str]:
     resp = requests.get(
-        f"{SUBSONIC_BASE_URL}/getStarred2.view", params={**SUBSONIC_AUTH_PARAMS, "f": "json"}
+        f"{SUBSONIC_BASE_URL}/getStarred2.view",
+        params={**SUBSONIC_AUTH_PARAMS, "f": "json"},
     )
     resp.raise_for_status()
     songs = resp.json()["subsonic-response"]["starred2"].get("song", [])
@@ -190,6 +223,9 @@ def fetch_all_subsonic_songs() -> list[dict]:
                     "album": s.get("album"),
                     "releaseYear": s.get("year"),
                     "starred": s.get("id") in starred,
+                    "playCount": s.get("playCount", 0),
+                    "skipCount": s.get("skipCount", 0),
+                    "lastPlayTime": s.get("lastPlayTime", 0),
                 }
             )
         bar.update(len(songs))
@@ -199,6 +235,7 @@ def fetch_all_subsonic_songs() -> list[dict]:
     bar.close()
     print()  # Ensure newline after progress bar
     return all_songs
+
 
 # --------------------------------------------------
 # LLM UTILITIES - artist and genre selection
@@ -226,7 +263,7 @@ def _llm_chat(messages: list[dict], _retries: int = 1) -> str:
                 model=LLM_MODEL,
                 messages=safe_messages,
                 stream=False,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
             )
         else:
             resp = client.chat.completions.create(
@@ -243,24 +280,28 @@ def _llm_chat(messages: list[dict], _retries: int = 1) -> str:
         )
 
     if resp is None or not resp.choices:
-        raise RuntimeError(f"LLM returned an empty response (model={LLM_MODEL}, mode={LLM_MODE}). "
-                           "Check that the model is loaded and the backend is reachable.")
+        raise RuntimeError(
+            f"LLM returned an empty response (model={LLM_MODEL}, mode={LLM_MODE}). "
+            "Check that the model is loaded and the backend is reachable."
+        )
 
     content = resp.choices[0].message.content or ""
-    
+
     # Debug: show raw content so we can see what the model actually returned
     logging.debug(f"[LLM RAW] len={len(content)} | first 300 chars: {content[:300]!r}")
     if not content.strip():
         # Also check reasoning_content in case the server separates think from answer
         reasoning = getattr(resp.choices[0].message, "reasoning_content", None) or ""
         if reasoning:
-            logging.debug(f"[LLM] content empty but reasoning_content present (len={len(reasoning)}); model may have only generated a think block")
+            logging.debug(
+                f"[LLM] content empty but reasoning_content present (len={len(reasoning)}); model may have only generated a think block"
+            )
 
     # --- Step 1: strip ALL think blocks FIRST before any further processing ---
     content = _remove_think_tags(content)
-    
+
     # Also strip unclosed <think> blocks (model hit token limit mid-think)
-    content = re.sub(r'<think>[\s\S]*$', '', content, flags=re.IGNORECASE).strip()
+    content = re.sub(r"<think>[\s\S]*$", "", content, flags=re.IGNORECASE).strip()
 
     # Retry once if the model returned empty content
     if not content.strip() and _retries > 0:
@@ -295,15 +336,12 @@ def _strip_fences(text: str) -> str:
 def _clean_json(text: str) -> str:
     """Attempt to fix common JSON errors from LLMs (trailing commas, etc)."""
     # Remove trailing commas before closing braces/brackets
-    text = re.sub(r',\s*([\]}])', r'\1', text)
+    text = re.sub(r",\s*([\]}])", r"\1", text)
     return text
 
 
 def select_focus_metadata_single_call(
-    prompt: str,
-    all_artists: list[str],
-    all_genres: list[str],
-    all_albums: list[str]
+    prompt: str, all_artists: list[str], all_genres: list[str], all_albums: list[str]
 ) -> dict[str, list[str]]:
     """
     Single LLM call to select relevant artists, genres, and albums together.
@@ -321,7 +359,7 @@ def select_focus_metadata_single_call(
             "- No preamble, no postamble, no explanation. Just the JSON."
         ),
     }
-    
+
     user_msg = {
         "role": "user",
         "content": (
@@ -331,7 +369,7 @@ def select_focus_metadata_single_call(
             f"Available albums ({len(all_albums)}): {all_albums}\n"
         ),
     }
-    
+
     raw = _llm_chat([system_msg, user_msg])
     raw = _clean_json(_strip_fences(raw))
 
@@ -339,22 +377,28 @@ def select_focus_metadata_single_call(
         parsed = json.loads(text)
         return {
             "artists": [x for x in parsed.get("artists", []) if x in all_artists],
-            "genres":  [x for x in parsed.get("genres",  []) if x in all_genres],
-            "albums":  [x for x in parsed.get("albums",  []) if x in all_albums],
+            "genres": [x for x in parsed.get("genres", []) if x in all_genres],
+            "albums": [x for x in parsed.get("albums", []) if x in all_albums],
         }
 
     try:
         return _parse_metadata(raw)
     except Exception as primary_err:
         # Backup: try to find any JSON object in the original raw response
-        fallback_match = re.search(r'\{[\s\S]*\}', raw)
+        fallback_match = re.search(r"\{[\s\S]*\}", raw)
         if fallback_match:
             try:
                 return _parse_metadata(_clean_json(fallback_match.group(0)))
             except Exception:
                 pass
-        print(f"[WARN] Metadata selection parse failed ({primary_err}); using top defaults.")
-        return {"artists": all_artists[:10], "genres": all_genres[:15], "albums": all_albums[:5]}
+        print(
+            f"[WARN] Metadata selection parse failed ({primary_err}); using top defaults."
+        )
+        return {
+            "artists": all_artists[:10],
+            "genres": all_genres[:15],
+            "albums": all_albums[:5],
+        }
 
 def filter_library_by_metadata(
     explicit_artists: list[str],
@@ -368,7 +412,7 @@ def filter_library_by_metadata(
     selected_albums: list[str],
     all_songs: list[dict],
     context_song_ids: set[str] = None,
-    semantic_song_ids: set[str] = None
+    semantic_song_ids: set[str] = None,
 ) -> list[dict]:
     """
     Filter library based on combined focus items with hierarchical, additive weighting.
@@ -378,45 +422,56 @@ def filter_library_by_metadata(
     exp_a = set(explicit_artists)
     exp_g = set(explicit_genres)
     exp_al = set(explicit_albums)
-    
+
     ctx_a = set(context_artists)
     ctx_g = set(context_genres)
     ctx_al = set(context_albums)
     ctx_ids = context_song_ids or set()
-    
+
     sel_a = set(selected_artists)
     sel_g = set(selected_genres)
     sel_al = set(selected_albums)
-    
+
     sem_ids = semantic_song_ids or set()
-    
+
     filtered = []
     for s in all_songs:
         song_artists = _split_artist_string(s.get("artist", ""))
         song_genre = s.get("genre")
         song_album = s.get("album")
         song_id = s.get("id")
-        
+
         score = 0.0
-        
+
         # New Additive Weighting System:
-        
+
         # 1. Explicit Matches (+3.0 each)
-        if any(a in exp_a for a in song_artists): score += 3.0
-        if song_genre in exp_g: score += 3.0
-        if song_album in exp_al: score += 3.0
-            
+        if any(a in exp_a for a in song_artists):
+            score += 3.0
+        if song_genre in exp_g:
+            score += 3.0
+        if song_album in exp_al:
+            score += 3.0
+
         # 2. Context Playlist Matches
+        # Explicitly in context playlist (+4.0)
+        if song_id in ctx_ids:
+            score += 4.0
         # Metadata matches if part of context
-        if any(a in ctx_a for a in song_artists): score += 1.0
-        if song_genre in ctx_g: score += 1.5
-        if song_album in ctx_al: score += 0.75
-            
+        if any(a in ctx_a for a in song_artists):
+            score += 2.0
+        if song_genre in ctx_g:
+            score += 2.0
+        if song_album in ctx_al:
+            score += 2.0
+
         # 3. LLM Chosen Focus Matches
-        if any(a in sel_a for a in song_artists): score += 1.5
-        if song_genre in sel_g: score += 1.5
-        if song_album in sel_al: score += 1.0
-            
+        if any(a in sel_a for a in song_artists):
+            score += 1.5
+        if song_genre in sel_g:
+            score += 1.5
+        if song_album in sel_al:
+            score += 1.5
         # 4. Starred/Favorited Boost (+1.0)
         if s.get("starred"):
             score += 1.0
@@ -425,6 +480,9 @@ def filter_library_by_metadata(
         if song_id in sem_ids:
             score += 1.0
 
+        # 6. Metadata-Based Score (play count, skip count, recency)
+        score += calculate_metadata_score(s)
+
         if score > 0:
             s_copy = s.copy()
             s_copy["_relevance_score"] = score
@@ -432,21 +490,20 @@ def filter_library_by_metadata(
 
     # Sort by relevance
     filtered.sort(key=lambda x: x.get("_relevance_score", 0), reverse=True)
-    
+
     # Cap candidate pool at Top 1000
     if len(filtered) > 1000:
         filtered = filtered[:1000]
         print(f"Capped candidate pool to top 1000 songs.")
-    
-    return filtered
 
+    return filtered
 
 
 def generate_playlist_single_call(
     prompt: str,
     filtered_songs: list[dict],
     min_songs: int,
-    explicit_artists: list[str] = None
+    explicit_artists: list[str] = None,
 ) -> list[dict]:
     """
     Generate playlist with a single LLM call.
@@ -519,15 +576,23 @@ def generate_playlist_single_call(
     picks = []
     try:
         parsed = json.loads(raw)
-        picks = parsed.get("picks", []) if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+        picks = (
+            parsed.get("picks", [])
+            if isinstance(parsed, dict)
+            else (parsed if isinstance(parsed, list) else [])
+        )
     except Exception:
         # --- Backup: regex-extract all integers from the raw response ---
-        extracted = re.findall(r'\b(\d+)\b', raw)
+        extracted = re.findall(r"\b(\d+)\b", raw)
         if extracted:
-            print(f"[WARN] JSON parse failed for playlist; extracted {len(extracted)} integers via regex fallback.")
+            print(
+                f"[WARN] JSON parse failed for playlist; extracted {len(extracted)} integers via regex fallback."
+            )
             picks = extracted
         else:
-            print(f"[ERROR] Playlist generation failed: could not parse response. Raw: {raw[:150]}")
+            print(
+                f"[ERROR] Playlist generation failed: could not parse response. Raw: {raw[:150]}"
+            )
 
     playlist = _resolve_picks(picks)
 
@@ -543,18 +608,18 @@ def generate_playlist_chunked(
     filtered_songs: list[dict],
     min_songs: int,
     chunk_size: int = 200,
-    explicit_artists: list[str] = None
+    explicit_artists: list[str] = None,
 ) -> list[dict]:
     """
     Generate playlist using chunked processing for large candidate pools.
-    
+
     Args:
         prompt: User's vibe prompt
         filtered_songs: Pre-filtered candidate songs
         min_songs: Minimum number of songs to include
         chunk_size: Number of songs to process per chunk (default: 200)
         explicit_artists: Artists explicitly mentioned in prompt
-    
+
     Returns:
         List of playlist items: [{"id": "...", "title": "..."}, ...]
     """
@@ -564,40 +629,44 @@ def generate_playlist_chunked(
             prompt=prompt,
             filtered_songs=filtered_songs,
             min_songs=min_songs,
-            explicit_artists=explicit_artists
+            explicit_artists=explicit_artists,
         )
-    
+
     # Split into chunks, maintaining score order (already sorted)
     num_chunks = math.ceil(len(filtered_songs) / chunk_size)
-    print(f"Processing {len(filtered_songs)} songs in {num_chunks} chunks of {chunk_size}")
-    
+    print(
+        f"Processing {len(filtered_songs)} songs in {num_chunks} chunks of {chunk_size}"
+    )
+
     all_selections = []
     songs_per_chunk = math.ceil(min_songs / num_chunks)
-    
+
     for i in range(num_chunks):
         start_idx = i * chunk_size
         end_idx = min(start_idx + chunk_size, len(filtered_songs))
         chunk = filtered_songs[start_idx:end_idx]
-        
-        print(f"Chunk {i+1}/{num_chunks}: {len(chunk)} songs")
-        
+
+        print(f"Chunk {i + 1}/{num_chunks}: {len(chunk)} songs")
+
         # Request proportional number of songs from this chunk
         chunk_target = min(songs_per_chunk, len(chunk))
-        
+
         try:
             chunk_playlist = generate_playlist_single_call(
                 prompt=prompt,
                 filtered_songs=chunk,
                 min_songs=chunk_target,
-                explicit_artists=explicit_artists
+                explicit_artists=explicit_artists,
             )
             all_selections.extend(chunk_playlist)
         except Exception as e:
-            print(f"[WARN] Chunk {i+1} failed: {e}")
+            print(f"[WARN] Chunk {i + 1} failed: {e}")
             # Fallback: take top-scored songs from this chunk
-            fallback = [{"id": s["id"], "title": s["title"]} for s in chunk[:chunk_target]]
+            fallback = [
+                {"id": s["id"], "title": s["title"]} for s in chunk[:chunk_target]
+            ]
             all_selections.extend(fallback)
-    
+
     # Deduplicate and trim to requested size
     seen_ids = set()
     unique_selections = []
@@ -605,11 +674,13 @@ def generate_playlist_chunked(
         if item["id"] not in seen_ids:
             seen_ids.add(item["id"])
             unique_selections.append(item)
-    
+
     # If we don't have enough, pad with top-scored unused songs
     if len(unique_selections) < min_songs:
-        unique_selections = ensure_min_songs(unique_selections, filtered_songs, min_songs)
-    
+        unique_selections = ensure_min_songs(
+            unique_selections, filtered_songs, min_songs
+        )
+
     return unique_selections[:min_songs]
 
 
@@ -617,12 +688,24 @@ def generate_playlist_chunked(
 # PLAYLIST PUSH/UPDATE HELPERS
 # --------------------------------------------------
 
-def _update_playlist_on_server(name: str, song_ids: list[str], description: str) -> bool:
-    pl_resp = requests.get(f"{SUBSONIC_BASE_URL}/getPlaylists", params=SUBSONIC_AUTH_PARAMS)
+
+def _update_playlist_on_server(
+    name: str, song_ids: list[str], description: str
+) -> bool:
+    pl_resp = requests.get(
+        f"{SUBSONIC_BASE_URL}/getPlaylists", params=SUBSONIC_AUTH_PARAMS
+    )
     pl_resp.raise_for_status()
     root = ET.fromstring(pl_resp.content)
     ns = root.tag.split("}")[0] + "}"
-    plid = next((pl.get("id") for pl in root.findall(f".//{ns}playlist") if pl.get("name") == name), None)
+    plid = next(
+        (
+            pl.get("id")
+            for pl in root.findall(f".//{ns}playlist")
+            if pl.get("name") == name
+        ),
+        None,
+    )
 
     if plid:
         upd = requests.get(
@@ -652,6 +735,7 @@ def _update_playlist_on_server(name: str, song_ids: list[str], description: str)
 
     return True
 
+
 # --------------------------------------------------
 # SUBSONIC BROWSING HELPERS
 # --------------------------------------------------
@@ -664,7 +748,7 @@ def fetch_all_artists() -> list[str]:
     )
     r.raise_for_status()
     idx = r.json()["subsonic-response"]["artists"]["index"]
-    
+
     # Collect all artist names and split compound artists
     all_artists = []
     for letter in idx:
@@ -672,7 +756,7 @@ def fetch_all_artists() -> list[str]:
             if art.get("name"):
                 individual_artists = _split_artist_string(art["name"])
                 all_artists.extend(individual_artists)
-    
+
     # Remove duplicates and sort
     return sorted(list(dict.fromkeys(all_artists)))
 
@@ -688,30 +772,32 @@ def fetch_all_genres() -> list[str]:
     genres = r.json()["subsonic-response"]["genres"]["genre"]
     return sorted(g["value"] for g in genres if g.get("value"))
 
+
 def fetch_all_playlists(exclude_name: str = None) -> list[dict]:
     """Return all playlists from the server with their details, excluding specified playlists."""
     r = requests.get(
         f"{SUBSONIC_BASE_URL}/getPlaylists",
         params={**SUBSONIC_AUTH_PARAMS, "f": "json"},
-        timeout=60
+        timeout=60,
     )
     r.raise_for_status()
     playlists = r.json()["subsonic-response"]["playlists"]["playlist"]
     all_playlists: list[dict] = []
     for pl in playlists:
         pl_id, pl_name = pl["id"], pl["name"]
-        
+
         # Skip Daily Mix playlists (case-insensitive)
         if pl_name.lower().startswith("daily mix"):
             continue
-            
+
         # Skip the target playlist to prevent circular references
         if exclude_name and pl_name.lower() == exclude_name.lower():
             continue
-            
+
         pl_songs = fetch_playlist_songs(pl_id)
         all_playlists.append({"id": pl_id, "name": pl_name, "songs": pl_songs})
     return all_playlists
+
 
 def fetch_playlist_songs(playlist_id: str) -> list[dict]:
     r = requests.get(
@@ -724,9 +810,11 @@ def fetch_playlist_songs(playlist_id: str) -> list[dict]:
     tracks = pl.get("entry") or pl.get("song") or []
     return [{"id": t["id"], "title": t["title"], "artist": t["artist"]} for t in tracks]
 
+
 # --------------------------------------------------
 # PROMPT ARTIST EXTRACTION
 # --------------------------------------------------
+
 
 def extract_prompt_artists(prompt: str, all_artists: list[str]) -> list[str]:
     """
@@ -734,6 +822,7 @@ def extract_prompt_artists(prompt: str, all_artists: list[str]) -> list[str]:
     Returns them in library order to preserve stability.
     """
     import re
+
     # Split prompt into words, ignore punctuation
     words = set(re.findall(r"\b\w+\b", prompt.lower()))
     result = []
@@ -744,11 +833,17 @@ def extract_prompt_artists(prompt: str, all_artists: list[str]) -> list[str]:
             result.append(artist)
     return result
 
+
 # --------------------------------------------------
 # CONTEXT PLAYLIST SELECTION
 # --------------------------------------------------
 
-def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], all_songs: list[dict], embedding_manager=None) -> list[dict]:
+def select_context_playlist_songs(
+    prompt: str,
+    existing_playlists: list[dict],
+    all_songs: list[dict],
+    embedding_manager=None,
+) -> list[dict]:
     """
     Select ONE playlist for context. If embedding_manager is provided, uses semantic similarity against
     playlist composition string. Otherwise asks the LLM to pick ONE playlist by name.
@@ -811,8 +906,7 @@ def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], a
     user_msg = {
         "role": "user",
         "content": (
-            f"Vibe prompt: {prompt}\n\n"
-            f"Available playlist names: {playlists_json}"
+            f"Vibe prompt: {prompt}\n\nAvailable playlist names: {playlists_json}"
         ),
     }
     raw = _strip_fences(_llm_chat([sys_msg, user_msg]))
@@ -841,25 +935,35 @@ def select_context_playlist_songs(prompt: str, existing_playlists: list[dict], a
     songs = [id_map[s["id"]] for s in pl["songs"] if s["id"] in id_map]
     return songs
 
+
 # --------------------------------------------------
 # PLAYLIST LENGTH ENFORCEMENT
 # --------------------------------------------------
 
-def ensure_min_songs(playlist: list[dict], candidates: list[dict], min_songs: int, max_songs: int = 50) -> list[dict]:
+
+def ensure_min_songs(
+    playlist: list[dict], candidates: list[dict], min_songs: int, max_songs: int = 50
+) -> list[dict]:
     if len(playlist) >= min_songs:
         return playlist[:max_songs]
     needed = min(min_songs - len(playlist), max_songs - len(playlist))
     remaining = [s for s in candidates if s["id"] not in {p["id"] for p in playlist}]
     random.shuffle(remaining)
     playlist.extend({"id": s["id"], "title": s["title"]} for s in remaining[:needed])
-    print(f"Added {len(remaining[:needed])} random songs from filtered options to reach minimum length of {min_songs}.")
+    print(
+        f"Added {len(remaining[:needed])} random songs from filtered options to reach minimum length of {min_songs}."
+    )
     return playlist[:max_songs]
+
 
 # --------------------------------------------------
 # PLAYLIST ENTRY SANITISER
 # --------------------------------------------------
 
-def _sanitize_playlist(entries: List[dict], candidates: List[dict], fuzzy_threshold: int = 90) -> List[dict]:
+
+def _sanitize_playlist(
+    entries: List[dict], candidates: List[dict], fuzzy_threshold: int = 90
+) -> List[dict]:
     """
     Ensure each playlist entry has an 'id'. If an entry only has a 'title'
     (and optionally 'artist'), try to resolve the matching song in *candidates*
@@ -888,8 +992,12 @@ def _sanitize_playlist(entries: List[dict], candidates: List[dict], fuzzy_thresh
         best_score = 0
         best_id = None
         for s in candidates:
-            title_score = fuzz.ratio((e.get("title") or "").lower(), (s.get("title") or "").lower())
-            artist_score = fuzz.ratio((e.get("artist") or "").lower(), (s.get("artist") or "").lower())
+            title_score = fuzz.ratio(
+                (e.get("title") or "").lower(), (s.get("title") or "").lower()
+            )
+            artist_score = fuzz.ratio(
+                (e.get("artist") or "").lower(), (s.get("artist") or "").lower()
+            )
             avg_score = (title_score + artist_score) // 2
             if avg_score > best_score and avg_score >= fuzzy_threshold:
                 best_score = avg_score
@@ -898,30 +1006,55 @@ def _sanitize_playlist(entries: List[dict], candidates: List[dict], fuzzy_thresh
             cleaned.append({"id": best_id, "title": e.get("title")})
     return cleaned
 
+
 # --------------------------------------------------
 # PROMPT ENTITY EXTRACTION
 # --------------------------------------------------
 
-STOPWORDS = {'and', 'but', 'mix', 'the', 'a', 'an', 'of', 'in', 'on', 'for', 'to', 'from', 'by', 'with', 'at', 'as', 'is', 'it', 'or', 'vs', 'feat', 'featuring'}
+STOPWORDS = {
+    "and",
+    "but",
+    "mix",
+    "the",
+    "a",
+    "an",
+    "of",
+    "in",
+    "on",
+    "for",
+    "to",
+    "from",
+    "by",
+    "with",
+    "at",
+    "as",
+    "is",
+    "it",
+    "or",
+    "vs",
+    "feat",
+    "featuring",
+}
 
-def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: list[str], all_albums: list[str]) -> dict:
+
+def extract_prompt_entities(
+    prompt: str, all_artists: list[str], all_genres: list[str], all_albums: list[str]
+) -> dict:
     """
     Extract artists, genres, and albums mentioned in the prompt using smart partial matching.
     Handles partial names like 'gambino' -> 'Childish Gambino'.
     Returns a dict with keys: 'artists', 'genres', 'albums'.
     """
-    entities = {'artists': [], 'genres': [], 'albums': []}
-    
+    entities = {"artists": [], "genres": [], "albums": []}
+
     # Clean prompt: remove stopwords and punctuation, split into words
     prompt_lc = prompt.lower()
-    prompt_words = set(re.findall(r'\b\w+\b', prompt_lc)) - STOPWORDS
-    
+    prompt_words = set(re.findall(r"\b\w+\b", prompt_lc)) - STOPWORDS
     # Helper to check matches in prompt
     def check_matches(items, key):
         for item in items:
             item_lc = item.lower()
-            item_words = set(re.findall(r'\b\w+\b', item_lc)) - STOPWORDS
-            
+            item_words = set(re.findall(r"\b\w+\b", item_lc)) - STOPWORDS
             # Exact match (full item name in prompt)
             if item_lc in prompt_lc:
                 entities[key].append(item)
@@ -930,22 +1063,23 @@ def extract_prompt_entities(prompt: str, all_artists: list[str], all_genres: lis
                 entities[key].append(item)
 
     # Artists: check both exact and partial matches
-    check_matches(all_artists, 'artists')
-    
+    check_matches(all_artists, "artists")
+
     # Albums: check both exact and partial matches
-    check_matches(all_albums, 'albums')
-    
+    check_matches(all_albums, "albums")
+
     # Genres: exact match only (genres are typically single words or short phrases)
     for genre in all_genres:
         if genre.lower() in prompt_lc:
-            entities['genres'].append(genre)
-    
+            entities["genres"].append(genre)
+
     return entities
 
 
 # --------------------------------------------------
 # MAIN (updated flow with context playlist)
 # --------------------------------------------------
+
 
 def _main_impl(args):
     playlist_name = args.playlist_name
@@ -955,7 +1089,7 @@ def _main_impl(args):
         return
 
     print("=== NaviDJ - AI Playlist Generator ===")
-    print("="*60)
+    print("=" * 60)
 
     # ========== STAGE 0: LIBRARY FETCH ==========
     start_t = time.time()
@@ -963,19 +1097,28 @@ def _main_impl(args):
     if not all_songs:
         print("No songs found on the server.")
         return
-    print(f"Library fetch complete: {len(all_songs)} songs ({time.time()-start_t:.1f}s)")
+    print(
+        f"Library fetch complete: {len(all_songs)} songs ({time.time() - start_t:.1f}s)"
+    )
 
     # ========== STAGE 1: METADATA GATHERING ==========
     start_t = time.time()
     all_artists = fetch_all_artists()
     all_genres = fetch_all_genres()
-    all_albums = [a for a in {s.get('album') for s in all_songs if s.get('album')} if isinstance(a, str)]
-    
+    all_albums = [
+        a
+        for a in {s.get("album") for s in all_songs if s.get("album")}
+        if isinstance(a, str)
+    ]
+
     # Randomize to avoid bias
     random.shuffle(all_artists)
     random.shuffle(all_genres)
     random.shuffle(all_albums)
-    print(f"Gathered metadata: {len(all_artists)} artists, {len(all_genres)} genres, {len(all_albums)} albums ({time.time()-start_t:.1f}s)")
+    print(
+        f"Gathered metadata: {len(all_artists)} artists, {len(all_genres)} genres, {len(all_albums)} albums ({time.time() - start_t:.1f}s)"
+    )
+
 
     # ========== SEMANTIC PRE-FILTERING (OPTIONAL) ==========
     start_t = time.time()
@@ -987,38 +1130,49 @@ def _main_impl(args):
     if embedding_manager:
         print(f"Using embedding model: {EMBEDDING_MODEL}")
         embedding_manager.check_library_size(len(all_songs))
-        
+
         # 1. Semantic Metadata Pre-selection (Top 40 each)
         print("Performing semantic metadata pre-selection...")
         sem_artists = embedding_manager.find_similar(prompt, all_artists, top_k=40)
         sem_genres = embedding_manager.find_similar(prompt, all_genres, top_k=40)
-        
         album_artist_map = {}
         for s in all_songs:
-            al = s.get('album')
-            ar = s.get('artist')
+            al = s.get("album")
+            ar = s.get("artist")
             if al and isinstance(al, str) and al not in album_artist_map:
                 album_artist_map[al] = ar
-                
-        album_texts = [f"{al} by {album_artist_map[al]}" if album_artist_map.get(al) else al for al in all_albums]
-        sem_album_indices = embedding_manager.find_similar_indices(prompt, album_texts, top_k=40)
+
+        album_texts = [
+            f"{al} by {album_artist_map[al]}" if album_artist_map.get(al) else al
+            for al in all_albums
+        ]
+        sem_album_indices = embedding_manager.find_similar_indices(
+            prompt, album_texts, top_k=40
+        )
         sem_albums = [all_albums[i] for i in sem_album_indices]
-        
         # 2. Semantic Song Pre-selection (Top 200)
         print("Finding semantically similar songs...")
-        song_texts = [f"{s.get('title','')} by {s.get('artist','')}" for s in all_songs]
-        sem_song_indices = embedding_manager.find_similar_indices(prompt, song_texts, top_k=200)
-        semantic_song_ids = {all_songs[idx]["id"] for idx in sem_song_indices if idx < len(all_songs)}
-        
-        print(f"Semantic pre-filtering complete ({time.time()-start_t:.1f}s)")
+        song_texts = [
+            f"{s.get('title', '')} by {s.get('artist', '')}" for s in all_songs
+        ]
+        sem_song_indices = embedding_manager.find_similar_indices(
+            prompt, song_texts, top_k=200
+        )
+        semantic_song_ids = {
+            all_songs[idx]["id"] for idx in sem_song_indices if idx < len(all_songs)
+        }
+
+        print(f"Semantic pre-filtering complete ({time.time() - start_t:.1f}s)")
     else:
         print("Skipping semantic pre-filtering (no embedding manager initialized).")
 
     # ========== CONTEXT ANALYSIS ==========
     start_t = time.time()
     existing_playlists = fetch_all_playlists(exclude_name=playlist_name)
-    context_songs = select_context_playlist_songs(prompt, existing_playlists, all_songs, embedding_manager=embedding_manager)
-    
+    context_songs = select_context_playlist_songs(
+        prompt, existing_playlists, all_songs, embedding_manager=embedding_manager
+    )
+
     # Extract metadata from context (Top N most frequent)
     context_artists = []
     context_genres = []
@@ -1035,19 +1189,20 @@ def _main_impl(args):
                 gen_counts[s["genre"]] += 1
             if s.get("album"):
                 alb_counts[s["album"]] += 1
-        
+
         context_artists = [a for a, _ in art_counts.most_common(10)]
         context_genres = [g for g, _ in gen_counts.most_common(5)]
         context_albums = [al for al, _ in alb_counts.most_common(5)]
-    
     # Extract explicit mentions from prompt
-    prompt_entities = extract_prompt_entities(prompt, all_artists, all_genres, all_albums)
-    explicit_artists = prompt_entities['artists']
-    explicit_genres = prompt_entities['genres']
-    explicit_albums = prompt_entities['albums']
-    
-    print(f"Context analysis complete ({time.time()-start_t:.1f}s)")
-    
+    prompt_entities = extract_prompt_entities(
+        prompt, all_artists, all_genres, all_albums
+    )
+    explicit_artists = prompt_entities["artists"]
+    explicit_genres = prompt_entities["genres"]
+    explicit_albums = prompt_entities["albums"]
+
+    print(f"Context analysis complete ({time.time() - start_t:.1f}s)")
+
     if explicit_artists:
         print(f"Explicit artists identified: {', '.join(explicit_artists)}")
     if explicit_genres:
@@ -1057,10 +1212,10 @@ def _main_impl(args):
     start_t = time.time()
     if embedding_manager is not None:
         print("Skipping LLM metadata selection; using semantically derived candidates.")
-        
+
         # Determine focus artists (explicitly requested + top 5 semantic)
         focus_artists = list(dict.fromkeys(explicit_artists + sem_artists[:5]))
-        
+
         # Inject albums from these focus artists
         focus_albums = []
         for al, ar in album_artist_map.items():
@@ -1068,13 +1223,13 @@ def _main_impl(args):
                 ar_split = _split_artist_string(ar)
                 if any(fa in ar_split for fa in focus_artists):
                     focus_albums.append(al)
-        
+
         combined_albums = list(dict.fromkeys(focus_albums + sem_albums))
-        
+
         selected_metadata = {
             "artists": list(dict.fromkeys(explicit_artists + sem_artists))[:15],
             "genres": sem_genres[:15],
-            "albums": combined_albums[:15]
+            "albums": combined_albums[:15],
         }
     else:
         print("Using LLM for metadata selection...")
@@ -1082,16 +1237,21 @@ def _main_impl(args):
             prompt=prompt,
             all_artists=sem_artists,
             all_genres=sem_genres,
-            all_albums=sem_albums
+            all_albums=sem_albums,
         )
-    
     duration = time.time() - start_t
-    
+
     # Display selected metadata (for debugging)
-    all_artists_combined = list(dict.fromkeys(explicit_artists + context_artists + selected_metadata["artists"]))
-    all_genres_combined = list(dict.fromkeys(explicit_genres + context_genres + selected_metadata["genres"]))
-    all_albums_combined = list(dict.fromkeys(context_albums + selected_metadata["albums"]))
-    
+    all_artists_combined = list(
+        dict.fromkeys(explicit_artists + context_artists + selected_metadata["artists"])
+    )
+    all_genres_combined = list(
+        dict.fromkeys(explicit_genres + context_genres + selected_metadata["genres"])
+    )
+    all_albums_combined = list(
+        dict.fromkeys(context_albums + selected_metadata["albums"])
+    )
+
     print(f"Chosen Artists: {', '.join(all_artists_combined)}")
     print(f"Chosen Genres: {', '.join(all_genres_combined)}")
     print(f"Chosen Albums: {', '.join(all_albums_combined)}")
@@ -1100,7 +1260,7 @@ def _main_impl(args):
     # ========== STAGE 2: WEIGHTED METADATA FILTER ==========
     start_t = time.time()
     context_song_ids = {s["id"] for s in context_songs} if context_songs else set()
-    
+
     candidate_pool = filter_library_by_metadata(
         explicit_artists=explicit_artists,
         explicit_genres=explicit_genres,
@@ -1113,10 +1273,18 @@ def _main_impl(args):
         selected_albums=selected_metadata["albums"],
         all_songs=all_songs,
         context_song_ids=context_song_ids,
-        semantic_song_ids=semantic_song_ids
+        semantic_song_ids=semantic_song_ids,
     )
-    print(f"Final candidate pool: {len(candidate_pool)} songs ({time.time()-start_t:.1f}s)")
-    
+    print(
+        f"Final candidate pool: {len(candidate_pool)} songs ({time.time() - start_t:.1f}s)"
+    )
+
+    if candidate_pool:
+        sample_scores = [
+            (s["title"], s.get("_metadata_score", 0)) for s in candidate_pool[:3]
+        ]
+        print(f"Sample metadata scores: {sample_scores}")
+
     if not candidate_pool:
         print("\nNo songs match the selected criteria. Try a different prompt.")
         return
@@ -1129,9 +1297,11 @@ def _main_impl(args):
         filtered_songs=candidate_pool,
         min_songs=args.min_songs,
         chunk_size=args.chunk_size,
-        explicit_artists=explicit_artists
+        explicit_artists=explicit_artists,
     )
-    print(f"Final playlist generated: {len(playlist_items)} tracks ({time.time()-start_t:.1f}s)")
+    print(
+        f"Final playlist generated: {len(playlist_items)} tracks ({time.time() - start_t:.1f}s)"
+    )
 
     # Sanitize playlist (resolve any missing IDs)
     playlist_items = _sanitize_playlist(playlist_items, candidate_pool)
@@ -1144,23 +1314,54 @@ def _main_impl(args):
     start_t = time.time()
     song_ids = [t["id"] for t in playlist_items]
     success = _update_playlist_on_server(playlist_name, song_ids, prompt)
-    
+
     if success:
-        print(f"Playlist '{playlist_name}' successfully updated on server ({time.time()-start_t:.1f}s)")
+        print(
+            f"Playlist '{playlist_name}' successfully updated on server ({time.time() - start_t:.1f}s)"
+        )
     else:
         print("ERROR: Failed to update playlist on server.")
-    
+
     print("\nComplete!")
-    print("="*60)
+    print("=" * 60)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate a playlist based on a vibe prompt.")
-    parser.add_argument("--playlist_name", type=str, default="naviDJ", help="Name of the playlist to create or update.")
+    parser = argparse.ArgumentParser(
+        description="Generate a playlist based on a vibe prompt."
+    )
+    parser.add_argument(
+        "--playlist_name",
+        type=str,
+        default="naviDJ",
+        help="Name of the playlist to create or update.",
+    )
     parser.add_argument("--prompt", type=str, help="Vibe prompt for the playlist.")
-    parser.add_argument("--min_songs", type=int, default=35, help="Minimum number of songs in the playlist.")
-    parser.add_argument("--chunk_size", type=int, default=DEFAULT_CHUNK_SIZE, help="Number of songs per LLM chunk (adjust based on context size).")
-    parser.add_argument("--llm_mode", type=str, choices=["openai", "ollama"], default=DEFAULT_LLM_MODE, help="Which LLM backend to use (overrides secrets.txt).")
-    parser.add_argument("--llm_model", type=str, default=DEFAULT_LLM_MODEL, help="Which LLM model to use (overrides secrets.txt).")
+    parser.add_argument(
+        "--min_songs",
+        type=int,
+        default=35,
+        help="Minimum number of songs in the playlist.",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help="Number of songs per LLM chunk (adjust based on context size).",
+    )
+    parser.add_argument(
+        "--llm_mode",
+        type=str,
+        choices=["openai", "ollama"],
+        default=DEFAULT_LLM_MODE,
+        help="Which LLM backend to use (overrides secrets.txt).",
+    )
+    parser.add_argument(
+        "--llm_model",
+        type=str,
+        default=DEFAULT_LLM_MODEL,
+        help="Which LLM model to use (overrides secrets.txt).",
+    )
     args = parser.parse_args()
 
     configure_llm(args.llm_mode, args.llm_model)
