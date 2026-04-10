@@ -492,9 +492,9 @@ def filter_library_by_metadata(
     filtered.sort(key=lambda x: x.get("_relevance_score", 0), reverse=True)
 
     # Cap candidate pool at Top 1000
-    if len(filtered) > 1000:
-        filtered = filtered[:1000]
-        print(f"Capped candidate pool to top 1000 songs.")
+    if len(filtered) > 500:
+        filtered = filtered[:500]
+        print(f"Capped candidate pool to top 500 songs.")
 
     return filtered
 
