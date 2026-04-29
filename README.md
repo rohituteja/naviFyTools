@@ -1,5 +1,4 @@
-# naviFy Tools
-# A DJ for Navidrome and Spotify <-> Navidrome/Subsonic Playlist Syncing
+# An AI DJ for Navidrome and Playlist Syncing for Spotify <-> Navidrome/Subsonic 
 
 A set of utilities for syncing playlists between Subsonic/Navidrome and Spotify and an AI powered DJ script to use with your music server to generate playlists as you please.
 
