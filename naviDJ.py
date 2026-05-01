@@ -241,7 +241,7 @@ def fetch_all_subsonic_songs() -> list[dict]:
 # LLM UTILITIES - artist and genre selection
 # --------------------------------------------------
 
-def _llm_chat(messages: list[dict], _retries: int = 1) -> str:
+def _llm_chat(messages: list[dict], _retries: int = 1, max_tokens: int | None = None) -> str:
     """Universal chat helper that works for both OpenAI & Ollama and always returns clean JSON-only content."""
 
     # Sanitize: every message content field must be a plain string.
@@ -257,27 +257,20 @@ def _llm_chat(messages: list[dict], _retries: int = 1) -> str:
             m["content"] = json.dumps(c) if isinstance(c, (dict, list)) else str(c)
         safe_messages.append(m)
 
+    create_kwargs = dict(
+        model=LLM_MODEL,
+        messages=safe_messages,
+        stream=False,
+        response_format={"type": "json_object"},
+    )
+    if max_tokens:
+        create_kwargs["max_tokens"] = max_tokens
+    if LLM_MODE != "openai":
+        create_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
     try:
-        if LLM_MODE == "openai":
-            resp = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=safe_messages,
-                stream=False,
-                response_format={"type": "json_object"},
-            )
-        else:
-            resp = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=safe_messages,
-                stream=False,
-            )
+        resp = client.chat.completions.create(**create_kwargs)
     except Exception:
-        # Fallback for older openai-python or backends that crash with response_format
-        resp = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=safe_messages,
-            stream=False,
-        )
+        resp = client.chat.completions.create(**create_kwargs)
 
     if resp is None or not resp.choices:
         raise RuntimeError(
@@ -307,7 +300,7 @@ def _llm_chat(messages: list[dict], _retries: int = 1) -> str:
     if not content.strip() and _retries > 0:
         print(f"[WARN] LLM returned empty content (model={LLM_MODEL}), retrying...")
         time.sleep(1)
-        return _llm_chat(messages, _retries=_retries - 1)
+        return _llm_chat(messages, _retries=_retries - 1, max_tokens=max_tokens)
 
     # --- Step 2: extract JSON object {...} buried in surrounding prose ---
     if "{" in content and "}" in content:
@@ -350,7 +343,7 @@ def select_focus_metadata_single_call(
         "role": "system",
         "content": (
             "You are a music metadata curator. Select metadata for a vibe prompt.\n"
-            "Reasoning: low\n\n"
+            "/no_think\n\n"
             "Rules:\n"
             "- Select ONLY items that exist exactly in the provided lists.\n"
             "- STRICTLY return ONLY valid JSON, no extra text, no markdown formatting:\n"
@@ -370,7 +363,7 @@ def select_focus_metadata_single_call(
         ),
     }
 
-    raw = _llm_chat([system_msg, user_msg])
+    raw = _llm_chat([system_msg, user_msg], max_tokens=1200)
     raw = _clean_json(_strip_fences(raw))
 
     def _parse_metadata(text):
@@ -533,7 +526,7 @@ def generate_playlist_single_call(
         "role": "system",
         "content": (
             "You are a playlist-builder AI.\n"
-            "Reasoning: low\n\n"
+            "/no_think\n\n"
             "You will receive a numbered list of candidate songs. "
             "A number followed by * means the user has starred/favorited that song.\n"
             "Rules:\n"
@@ -555,7 +548,8 @@ def generate_playlist_single_call(
         "content": f"Vibe: {prompt}\n\nCandidates:\n{candidate_text}",
     }
 
-    raw = _strip_fences(_llm_chat([system_msg, user_msg]))
+    call_max_tokens = min_songs * 24 + 100
+    raw = _strip_fences(_llm_chat([system_msg, user_msg], max_tokens=call_max_tokens))
 
     # -- 5. Post-process: map picks back to song dicts ---------------------
     def _resolve_picks(picks):
@@ -897,7 +891,7 @@ def select_context_playlist_songs(
         "role": "system",
         "content": (
             "You are a playlist-builder AI.\n"
-            "Reasoning: low\n\n"
+            "/no_think\n\n"
             "Pick the single most relevant playlist for the given vibe.\n"
             "STRICTLY return ONLY valid JSON: {\"playlist_name\": \"Name\"} or {} if none fit.\n"
             "No preamble, no postamble, no markdown formatting."
@@ -909,7 +903,7 @@ def select_context_playlist_songs(
             f"Vibe prompt: {prompt}\n\nAvailable playlist names: {playlists_json}"
         ),
     }
-    raw = _strip_fences(_llm_chat([sys_msg, user_msg]))
+    raw = _strip_fences(_llm_chat([sys_msg, user_msg], max_tokens=400))
     playlist_name = ""
     try:
         parsed = json.loads(raw)
@@ -1058,8 +1052,8 @@ def extract_prompt_entities(
             # Exact match (full item name in prompt)
             if item_lc in prompt_lc:
                 entities[key].append(item)
-            # Partial match (any significant word from item name in prompt)
-            elif item_words and item_words & prompt_words:  # Intersection
+            # Partial match (ALL significant words from item must be in prompt)
+            elif len(item_words) >= 2 and item_words.issubset(prompt_words):
                 entities[key].append(item)
 
     # Artists: check both exact and partial matches
@@ -1283,7 +1277,6 @@ def _main_impl(args):
         sample_scores = [
             (s["title"], s.get("_metadata_score", 0)) for s in candidate_pool[:3]
         ]
-        print(f"Sample metadata scores: {sample_scores}")
 
     if not candidate_pool:
         print("\nNo songs match the selected criteria. Try a different prompt.")
