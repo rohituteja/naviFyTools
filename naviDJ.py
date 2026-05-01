@@ -112,10 +112,10 @@ def calculate_metadata_score(song: dict) -> float:
     """Calculate score from play count, skip count, and recency."""
     score = 0.0
 
-    # 1. Play count bonus: +0.1 for each 7 plays
+    # 1. Play count bonus: logarithmic, diminishing returns
     play_count = song.get("playCount", 0)
     if play_count > 0:
-        score += 0.1 * (play_count // 7)
+        score += math.log2(play_count + 1) * 0.05
 
     # 2. Skip count penalty: -0.1 for each 5 skips above 5
     skip_count = song.get("skipCount", 0)
@@ -465,13 +465,13 @@ def filter_library_by_metadata(
             score += 1.5
         if song_album in sel_al:
             score += 1.5
-        # 4. Starred/Favorited Boost (+1.0)
+        # 4. Starred/Favorited Boost (+1.5)
         if s.get("starred"):
-            score += 1.0
+            score += 1.5
 
-        # 5. Semantic Vibe Matches (+1.0)
+        # 5. Semantic Vibe Matches (+1.5)
         if song_id in sem_ids:
-            score += 1.0
+            score += 1.5
 
         # 6. Metadata-Based Score (play count, skip count, recency)
         score += calculate_metadata_score(s)
@@ -484,12 +484,20 @@ def filter_library_by_metadata(
     # Sort by relevance
     filtered.sort(key=lambda x: x.get("_relevance_score", 0), reverse=True)
 
-    # Cap candidate pool at Top 1000
-    if len(filtered) > 500:
-        filtered = filtered[:500]
-        print(f"Capped candidate pool to top 500 songs.")
+    # Stratified tiered candidate pool
+    tier1 = [s for s in filtered if s.get("_relevance_score", 0) >= 6.0][:200]
+    tier2 = [s for s in filtered if 2.0 <= s.get("_relevance_score", 0) < 6.0][:200]
+    tier3 = [s for s in filtered if 0 < s.get("_relevance_score", 0) < 2.0]
+    random.shuffle(tier3)
+    tier3 = tier3[:100]
 
-    return filtered
+    pool = tier1 + tier2 + tier3
+    random.shuffle(pool)
+
+    if len(pool) < len(filtered):
+        print(f"Stratified pool: {len(tier1)} high + {len(tier2)} medium + {len(tier3)} discovery = {len(pool)} songs.")
+
+    return pool
 
 
 def generate_playlist_single_call(
@@ -639,6 +647,7 @@ def generate_playlist_chunked(
         start_idx = i * chunk_size
         end_idx = min(start_idx + chunk_size, len(filtered_songs))
         chunk = filtered_songs[start_idx:end_idx]
+        random.shuffle(chunk)
 
         print(f"Chunk {i + 1}/{num_chunks}: {len(chunk)} songs")
 
