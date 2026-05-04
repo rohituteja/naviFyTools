@@ -6,12 +6,15 @@ A set of utilities for syncing playlists between Subsonic/Navidrome and Spotify 
 - **naviDJ.py**: AI-powered playlist generator for Subsonic/Navidrome using OpenAI, Ollama, or a Custom OpenAI-compatible API.
     - **Semantic Optimization**: Uses embedding-based similarity search to pre-filter your library, reducing token usage by 80-90% and speeding up generation.
     - **Chunked Generation**: Processes large song lists in configurable batches to handle context window limits and improve accuracy.
-    - **Context Awareness**: Adds smarter focus via context playlists and relevant albums from your library.
+    - **Stratified Pool Selection**: Songs are tiered by metadata score (high/medium/low) and sampled proportionally for balanced playlists.
+    - **Context Awareness**: Adds smarter focus via context playlists and albums from your library.
 - **portLibrary.py**: Syncs starred/liked songs and playlists between Spotify and Subsonic/Navidrome (both directions).
 - **portGenres.py**: Updates local music file genres using MusicBrainz tags.
 - **Web App**: Modern web interface with configuration management, Spotify login, model picker, and real-time output.
 
 **Note on Open WebUI**: This project fully supports Open WebUI! You can use it as a robust proxy for Ollama by selecting "ollama" mode and pointing the URL to your Open WebUI instance. This allows you to leverage Open WebUI's features like custom context lengths and model management while using naviDJ.
+
+**Note on thinking mode**: For local models that support it (e.g., Qwen3.6, DeepSeek), the settings UI includes a thinking toggle that controls whether the model's reasoning traces are enabled via the API. This is separate from the JSON playlist output.
 
 ## Web App (Flask UI)
 
@@ -57,7 +60,7 @@ MUSIC_DIR = <path to your music directory here>
 [llm]
 # Set the default LLM backend: "openai", "ollama", or "custom"
 MODE = openai
-# LLM model name (e.g. gpt-4o-mini, gemma3n:latest)
+# LLM model name (e.g. gpt-4o-mini, qwen3.6:35b, gemma3n:latest)
 MODEL = gpt-4o-mini
 # Number of songs to process at once. Lower values reduce token usage but may be slower.
 # Default: 500
@@ -205,7 +208,7 @@ python portGenres.py /path/to/your/music --dry-run
 
 - **"INVALID_CLIENT: Invalid redirect URI"**: Ensure your Spotify dashboard URI matches `secrets.txt` EXACTLY.
 - **Slow Generation**: Ensure `EMBEDDING_MODEL` is configured to enable semantic pre-filtering.
-- **Parse Errors**: Check the real-time logs in the web app. If using local models, ensure they are capable of outputting valid JSON (recommended: `gpt-4o-mini`, `gemma3n`, `llama3.1`).
+- **Parse Errors**: Check the real-time logs in the web app. If using local models, ensure they are capable of outputting valid JSON (recommended: `gpt-4o-mini`, `qwen3.6:35b`, `gemma3n`).
 
 ---
 

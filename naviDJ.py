@@ -55,6 +55,7 @@ DEFAULT_CUSTOM_BASE_URL = secrets.get("custom", "base_url", fallback=None)
 DEFAULT_LLM_MODE = secrets.get("llm", "mode", fallback="openai").lower()
 DEFAULT_LLM_MODEL = secrets.get("llm", "model", fallback=None)
 DEFAULT_CHUNK_SIZE = int(secrets.get("llm", "chunk_size", fallback="500"))
+DEFAULT_THINKING_ENABLED = secrets.get("llm", "thinking_enabled", fallback="on").lower() == "on"
 
 
 SUBSONIC_BASE_URL = secrets.get("subsonic", "BASE_URL", fallback=None)
@@ -68,6 +69,7 @@ SUBSONIC_AUTH_PARAMS = {
 # Will be overwritten in `configure_llm` but need a placeholder so _llm_chat can be defined early.
 LLM_MODE: str = DEFAULT_LLM_MODE  # 'openai' | 'ollama'
 LLM_MODEL: str = DEFAULT_LLM_MODEL or ""  # auto-filled later
+THINKING_ENABLED: bool = DEFAULT_THINKING_ENABLED
 client: OpenAI | None = None  # global client instance
 EMBEDDING_MODEL: str | None = None
 embedding_manager: EmbeddingManager | None = None
@@ -76,13 +78,31 @@ embedding_manager: EmbeddingManager | None = None
 # HELPER FOR CLEANING LLM OUTPUT
 # --------------------------------------------------
 
-# Matches closed <think>...</think> blocks (including multiline)
 _THINK_CLOSED_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 
-
 def _remove_think_tags(text: str) -> str:
-    """Strip <think>...</think> blocks (Ollama 'thinking' traces) and trim whitespace."""
-    return _THINK_CLOSED_RE.sub("", text).strip()
+    """
+    Strip <think>...</think> blocks and any content before the final </think>.
+    Handles: closed blocks, unclosed blocks (model hit token limit mid-think),
+    malformed whitespace in tags, and multiple consecutive think blocks.
+    """
+    # Step 1: Strip all complete <think>...</think> blocks (non-greedy)
+    text = _THINK_CLOSED_RE.sub("", text)
+
+    # Step 2: If a </think> closing tag remains anywhere, discard everything before
+    # and including it — catches cases where opening <think> was already stripped
+    # but closing tag remained, or multiple blocks left a trailing closer
+    if "</think>" in text.lower():
+        idx = text.lower().rfind("</think>")
+        text = text[idx + len("</think>"):]
+
+    # Step 3: Strip unclosed <think> block — model hit token limit mid-think.
+    # Everything from an unclosed <think> to end of string is reasoning noise.
+    unclosed = re.search(r"<think>[\s\S]*$", text, re.IGNORECASE)
+    if unclosed:
+        text = text[:unclosed.start()]
+
+    return text.strip()
 
 
 def _split_artist_string(artist_string: str) -> list[str]:
@@ -147,6 +167,7 @@ def configure_llm(mode: str = None, model: str = None) -> None:
         )
 
     LLM_MODE = mode
+    THINKING_ENABLED = secrets.get("llm", "thinking_enabled", fallback="on").lower() == "on"
 
     if mode == "openai":
         LLM_MODEL = model or DEFAULT_LLM_MODEL or "gpt-4o-mini"
@@ -266,7 +287,7 @@ def _llm_chat(messages: list[dict], _retries: int = 1, max_tokens: int | None = 
     if max_tokens:
         create_kwargs["max_tokens"] = max_tokens
     if LLM_MODE != "openai":
-        create_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        create_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": THINKING_ENABLED}}
     try:
         resp = client.chat.completions.create(**create_kwargs)
     except Exception:
@@ -280,21 +301,23 @@ def _llm_chat(messages: list[dict], _retries: int = 1, max_tokens: int | None = 
 
     content = resp.choices[0].message.content or ""
 
+    # reasoning_content is the extracted think block — only use it if content is empty
+    reasoning = getattr(resp.choices[0].message, "reasoning_content", None) or ""
+    if not content.strip() and reasoning:
+        logging.debug(
+            f"[LLM] content empty but reasoning_content present (len={len(reasoning)}); model may have only generated a think block"
+        )
+        # content stays empty, will trigger retry below
+
     # Debug: show raw content so we can see what the model actually returned
     logging.debug(f"[LLM RAW] len={len(content)} | first 300 chars: {content[:300]!r}")
     if not content.strip():
-        # Also check reasoning_content in case the server separates think from answer
-        reasoning = getattr(resp.choices[0].message, "reasoning_content", None) or ""
-        if reasoning:
-            logging.debug(
-                f"[LLM] content empty but reasoning_content present (len={len(reasoning)}); model may have only generated a think block"
-            )
+        logging.debug(
+            f"[LLM] content empty but reasoning_content present (len={len(reasoning)}); model may have only generated a think block"
+        )
 
     # --- Step 1: strip ALL think blocks FIRST before any further processing ---
     content = _remove_think_tags(content)
-
-    # Also strip unclosed <think> blocks (model hit token limit mid-think)
-    content = re.sub(r"<think>[\s\S]*$", "", content, flags=re.IGNORECASE).strip()
 
     # Retry once if the model returned empty content
     if not content.strip() and _retries > 0:
@@ -343,7 +366,6 @@ def select_focus_metadata_single_call(
         "role": "system",
         "content": (
             "You are a music metadata curator. Select metadata for a vibe prompt.\n"
-            "/no_think\n\n"
             "Rules:\n"
             "- Select ONLY items that exist exactly in the provided lists.\n"
             "- STRICTLY return ONLY valid JSON, no extra text, no markdown formatting:\n"
@@ -485,11 +507,11 @@ def filter_library_by_metadata(
     filtered.sort(key=lambda x: x.get("_relevance_score", 0), reverse=True)
 
     # Stratified tiered candidate pool
-    tier1 = [s for s in filtered if s.get("_relevance_score", 0) >= 6.0][:200]
-    tier2 = [s for s in filtered if 2.0 <= s.get("_relevance_score", 0) < 6.0][:200]
+    tier1 = [s for s in filtered if s.get("_relevance_score", 0) >= 5.0][:250]
+    tier2 = [s for s in filtered if 2.0 <= s.get("_relevance_score", 0) < 5.0][:200]
     tier3 = [s for s in filtered if 0 < s.get("_relevance_score", 0) < 2.0]
     random.shuffle(tier3)
-    tier3 = tier3[:100]
+    tier3 = tier3[:50]
 
     pool = tier1 + tier2 + tier3
     random.shuffle(pool)
@@ -534,7 +556,6 @@ def generate_playlist_single_call(
         "role": "system",
         "content": (
             "You are a playlist-builder AI.\n"
-            "/no_think\n\n"
             "You will receive a numbered list of candidate songs. "
             "A number followed by * means the user has starred/favorited that song.\n"
             "Rules:\n"
@@ -556,7 +577,7 @@ def generate_playlist_single_call(
         "content": f"Vibe: {prompt}\n\nCandidates:\n{candidate_text}",
     }
 
-    call_max_tokens = min_songs * 24 + 100
+    call_max_tokens = None if LLM_MODE != "openai" else min_songs * 24 + 100
     raw = _strip_fences(_llm_chat([system_msg, user_msg], max_tokens=call_max_tokens))
 
     # -- 5. Post-process: map picks back to song dicts ---------------------
@@ -584,8 +605,10 @@ def generate_playlist_single_call(
             else (parsed if isinstance(parsed, list) else [])
         )
     except Exception:
+        print(f"[DEBUG] raw response (first 500 chars): {raw[:500]!r}")
         # --- Backup: regex-extract all integers from the raw response ---
-        extracted = re.findall(r"\b(\d+)\b", raw)
+        fallback_raw = _remove_think_tags(raw)
+        extracted = re.findall(r"\b(\d+)\b", fallback_raw)
         if extracted:
             print(
                 f"[WARN] JSON parse failed for playlist; extracted {len(extracted)} integers via regex fallback."
@@ -900,7 +923,6 @@ def select_context_playlist_songs(
         "role": "system",
         "content": (
             "You are a playlist-builder AI.\n"
-            "/no_think\n\n"
             "Pick the single most relevant playlist for the given vibe.\n"
             "STRICTLY return ONLY valid JSON: {\"playlist_name\": \"Name\"} or {} if none fit.\n"
             "No preamble, no postamble, no markdown formatting."

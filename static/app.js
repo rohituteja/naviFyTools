@@ -176,6 +176,28 @@ document.getElementById('embeddingModelSelect')?.addEventListener('change', func
     currentEmbeddingModel = e.target.value;
 });
 
+// Thinking toggle change handler
+document.getElementById('thinkingToggle')?.addEventListener('change', async function(e) {
+    const value = e.target.checked ? 'on' : 'off';
+    try {
+        const response = await fetch('/update_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ llm: { thinking_enabled: value } })
+        });
+        const result = await response.json();
+        if (result.status === 'success') {
+            console.log('Thinking mode:', value);
+        } else {
+            e.target.checked = !e.target.checked;
+            alert('Error updating configuration: ' + result.message);
+        }
+    } catch (error) {
+        e.target.checked = !e.target.checked;
+        console.error('Error updating thinking mode:', error);
+    }
+});
+
 
 // Helper function to handle script execution and output streaming
 function handleScriptExecution(formId, outputId, endpoint) {
@@ -531,6 +553,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 if (config.llm && config.llm.model) {
                     currentLlmModel = config.llm.model;
+                }
+                
+                // Set thinking toggle state
+                const thinkingToggle = document.getElementById('thinkingToggle');
+                if (thinkingToggle && config.llm && config.llm.thinking_enabled) {
+                    thinkingToggle.checked = config.llm.thinking_enabled.toLowerCase() === 'on';
                 }
                 
                 // Get embedding model from appropriate section
