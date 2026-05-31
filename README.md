@@ -12,7 +12,7 @@ A set of utilities for syncing playlists between Subsonic/Navidrome and Spotify 
 - **portGenres.py**: Updates local music file genres using MusicBrainz tags.
 - **Web App**: Modern web interface with configuration management, Spotify login, model picker, and real-time output.
 
-**Note on Open WebUI**: This project fully supports Open WebUI! You can use it as a robust proxy for Ollama by selecting "ollama" mode and pointing the URL to your Open WebUI instance. This allows you to leverage Open WebUI's features like custom context lengths and model management while using naviDJ.
+**Note on Open WebUI**: This project fully supports Open WebUI! You can use it as a robust proxy for Ollama by selecting "ollama" mode and pointing the URL to your Open WebUI instance. This allows you to leverage Open WebUI's features like custom context lengths and model management while using naviDJ. Open WebUI 0.9.x requires a `chat_id` on external chat API calls; naviDJ sends this automatically.
 
 **Note on thinking mode**: For local models that support it (e.g., Qwen3.6, DeepSeek), the settings UI includes a thinking toggle that controls whether the model's reasoning traces are enabled via the API. This is separate from the JSON playlist output.
 

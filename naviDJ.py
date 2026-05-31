@@ -28,7 +28,7 @@ import re
 import time
 
 from tqdm import tqdm
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 import argparse
 from typing import List, Dict  # optional, only for type hints
 from collections import Counter
@@ -287,11 +287,45 @@ def _llm_chat(messages: list[dict], _retries: int = 1, max_tokens: int | None = 
     if max_tokens:
         create_kwargs["max_tokens"] = max_tokens
     if LLM_MODE != "openai":
-        create_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": THINKING_ENABLED}}
+        # chat_id required by Open WebUI 0.9.x for external API clients (ignored by native Ollama)
+        create_kwargs["extra_body"] = {
+            "chat_id": "navidj-api",
+            "chat_template_kwargs": {"enable_thinking": THINKING_ENABLED},
+        }
+
+    def _call(kwargs: dict):
+        return client.chat.completions.create(**kwargs)
+
     try:
-        resp = client.chat.completions.create(**create_kwargs)
-    except Exception:
-        resp = client.chat.completions.create(**create_kwargs)
+        resp = _call(create_kwargs)
+    except BadRequestError as e:
+        err_text = str(e).lower()
+        extra_body = create_kwargs.get("extra_body") or {}
+
+        if "startswith" in err_text and not extra_body.get("chat_id"):
+            logging.warning("[LLM] Retrying with chat_id (Open WebUI workaround)")
+            retry_kwargs = dict(create_kwargs)
+            retry_extra = dict(extra_body)
+            retry_extra["chat_id"] = "navidj-api"
+            retry_kwargs["extra_body"] = retry_extra
+            resp = _call(retry_kwargs)
+        elif LLM_MODE != "openai" and "response_format" in create_kwargs:
+            logging.warning(f"[LLM] BadRequestError, retrying without response_format: {e}")
+            retry_kwargs = dict(create_kwargs)
+            retry_kwargs.pop("response_format", None)
+            resp = _call(retry_kwargs)
+        else:
+            logging.error(f"[LLM] BadRequestError: {e}")
+            raise
+    except Exception as e:
+        if LLM_MODE != "openai" and "response_format" in create_kwargs:
+            logging.warning(f"[LLM] Request failed ({e}); retrying without response_format")
+            retry_kwargs = dict(create_kwargs)
+            retry_kwargs.pop("response_format", None)
+            resp = _call(retry_kwargs)
+        else:
+            logging.error(f"[LLM] Request failed: {e}")
+            raise
 
     if resp is None or not resp.choices:
         raise RuntimeError(
