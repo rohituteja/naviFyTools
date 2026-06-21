@@ -54,9 +54,20 @@ def authenticate_spotify():
     token_info = sp_oauth.get_cached_token()          # ① look for cache
 
     if token_info and sp_oauth.is_token_expired(token_info):
-        token_info = sp_oauth.refresh_access_token(   # ② silent refresh
-            token_info["refresh_token"]
-        )
+        try:
+            token_info = sp_oauth.refresh_access_token(   # ② silent refresh
+                token_info["refresh_token"]
+            )
+        except Exception as e:
+            if "invalid_grant" in str(e).lower():
+                if os.path.exists(SPOTIFY_CACHE_PATH):
+                    try:
+                        os.remove(SPOTIFY_CACHE_PATH)
+                    except Exception:
+                        pass
+                token_info = None
+            else:
+                raise e
 
     if not token_info:                                # ③ interactive login
         auth_url = sp_oauth.get_authorize_url()

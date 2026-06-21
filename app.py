@@ -77,6 +77,27 @@ def get_spotify_oauth():
         show_dialog=False
     )
 
+def get_valid_token(sp_oauth):
+    """Retrieve cached token and refresh it if expired.
+    If refresh fails due to 'invalid_grant', discard cached token.
+    """
+    if not sp_oauth:
+        return None
+    token_info = sp_oauth.get_cached_token()
+    if token_info and sp_oauth.is_token_expired(token_info):
+        try:
+            token_info = sp_oauth.refresh_access_token(token_info["refresh_token"])
+        except Exception as e:
+            if "invalid_grant" in str(e).lower():
+                cache_path = sp_oauth.cache_path
+                if os.path.exists(cache_path):
+                    try:
+                        os.remove(cache_path)
+                    except Exception:
+                        pass
+            return None
+    return token_info
+
 def check_spotify_auth():
     """Check if user is authenticated with Spotify."""
     sp_oauth = get_spotify_oauth()
@@ -84,9 +105,7 @@ def check_spotify_auth():
         return {"authenticated": False, "error": "Spotify credentials not configured"}
     
     try:
-        token_info = sp_oauth.get_cached_token()
-        if token_info and sp_oauth.is_token_expired(token_info):
-            token_info = sp_oauth.refresh_access_token(token_info["refresh_token"])
+        token_info = get_valid_token(sp_oauth)
         
         if token_info:
             # Test the token by making a simple API call
@@ -433,9 +452,7 @@ def spotify_playlists():
     if not sp_oauth:
         return jsonify({"error": "Spotify credentials not configured"}), 400
     try:
-        token_info = sp_oauth.get_cached_token()
-        if token_info and sp_oauth.is_token_expired(token_info):
-            token_info = sp_oauth.refresh_access_token(token_info["refresh_token"])
+        token_info = get_valid_token(sp_oauth)
         if not token_info:
             return jsonify({"error": "Not authenticated"}), 401
 
