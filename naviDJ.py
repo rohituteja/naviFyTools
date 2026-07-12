@@ -28,12 +28,18 @@ import re
 import time
 
 from tqdm import tqdm
-from openai import BadRequestError, OpenAI
+from openai import (
+    BadRequestError,
+    OpenAI,
+    RateLimitError,
+    APITimeoutError,
+    APIConnectionError,
+    InternalServerError,
+)
 import argparse
 from typing import List, Dict  # optional, only for type hints
 from collections import Counter
 import configparser
-from rapidfuzz import fuzz
 import logging
 from embeddings import EmbeddingManager
 
@@ -276,6 +282,29 @@ def calculate_metadata_score(song: dict) -> float:
     return score
 
 
+def _era_bonus(release_year, era_range: tuple[int, int] | None) -> float:
+    """
+    Loose scoring bonus for a song's `releaseYear` against a detected prompt
+    era. +1.0 when the year falls inside the range, +0.5 when it's within 5
+    years outside either edge, 0.0 otherwise (including when no era was
+    detected or the year is missing/unparseable). This is purely additive —
+    it must never be used to filter or exclude a song.
+    """
+    if not era_range or not release_year:
+        return 0.0
+    try:
+        year = int(release_year)
+    except (TypeError, ValueError):
+        return 0.0
+
+    start, end = era_range
+    if start <= year <= end:
+        return 1.0
+    if (start - 5) <= year < start or end < year <= (end + 5):
+        return 0.5
+    return 0.0
+
+
 def configure_llm(mode: str = None, model: str = None) -> None:
     """Initialise the global `client`, `LLM_MODE`, and `LLM_MODEL` based on *mode* and *model*."""
     global LLM_MODE, LLM_MODEL, client, EMBEDDING_MODEL, embedding_manager
@@ -328,6 +357,66 @@ def configure_llm(mode: str = None, model: str = None) -> None:
 # --------------------------------------------------
 
 
+def _parse_subsonic_genres(raw_song: dict) -> list[str]:
+    """
+    Extract the full genre list for a raw Subsonic/OpenSubsonic song JSON
+    object. Plain Subsonic only exposes a singular `genre` string;
+    OpenSubsonic servers also expose a `genres` array of `{"name": ...}`
+    objects. The legacy `genre` value is kept first (for backward
+    compatibility) followed by any additional distinct names from the array.
+    Defensive: returns [] when neither field is present.
+    """
+    genres: list[str] = []
+    primary = raw_song.get("genre")
+    if primary:
+        genres.append(primary)
+    for g in raw_song.get("genres") or []:
+        name = g.get("name") if isinstance(g, dict) else g if isinstance(g, str) else None
+        if name and name not in genres:
+            genres.append(name)
+    return genres
+
+
+def _song_genres(song: dict) -> list[str]:
+    """
+    Full genre list for a song dict already produced by
+    `fetch_all_subsonic_songs` (i.e. reads our internal `genres`/`genre`
+    keys, not the raw API response). Falls back to the singular `genre`
+    field when `genres` is absent, for defensiveness.
+    """
+    genres = song.get("genres")
+    if genres:
+        return genres
+    g = song.get("genre")
+    return [g] if g else []
+
+
+def _song_embedding_text(song: dict) -> str:
+    """
+    Build the text used to embed a song for semantic search. Includes title,
+    artist, and (when present) album, genres, and release year so the vector
+    captures more than just "title by artist". Empty/missing fields are
+    omitted cleanly rather than leaving literal blanks like "album: ".
+    """
+    title = song.get("title") or ""
+    artist = song.get("artist") or ""
+    parts = [f"{title} by {artist}".strip()]
+
+    album = song.get("album")
+    if album:
+        parts.append(f"album: {album}")
+
+    genres = _song_genres(song)
+    if genres:
+        parts.append(f"genres: {', '.join(genres)}")
+
+    year = song.get("releaseYear")
+    if year:
+        parts.append(f"year: {year}")
+
+    return " | ".join(parts)
+
+
 def fetch_starred_ids() -> set[str]:
     resp = requests.get(
         f"{SUBSONIC_BASE_URL}/getStarred2.view",
@@ -342,6 +431,7 @@ def fetch_all_subsonic_songs() -> list[dict]:
     all_songs: list[dict] = []
     song_offset, song_count = 0, 500
     bar = tqdm(desc="Fetching songs", unit="song", dynamic_ncols=True, ascii=True)
+    starred = fetch_starred_ids()  # fetched once per run, not once per page
 
     while True:
         resp = requests.get(
@@ -357,15 +447,16 @@ def fetch_all_subsonic_songs() -> list[dict]:
         resp.raise_for_status()
         data = resp.json()["subsonic-response"].get("searchResult3", {})
         songs = data.get("song", [])
-        starred = fetch_starred_ids()
 
         for s in songs:
+            genres = _parse_subsonic_genres(s)
             all_songs.append(
                 {
                     "id": s.get("id"),
                     "title": s.get("title"),
                     "artist": s.get("artist"),
-                    "genre": s.get("genre"),
+                    "genre": genres[0] if genres else None,
+                    "genres": genres,
                     "album": s.get("album"),
                     "releaseYear": s.get("year"),
                     "starred": s.get("id") in starred,
@@ -386,6 +477,17 @@ def fetch_all_subsonic_songs() -> list[dict]:
 # --------------------------------------------------
 # LLM UTILITIES - artist and genre selection
 # --------------------------------------------------
+
+# Transient errors are worth retrying (rate limit, timeout, connection drop,
+# 5xx from the backend); auth/bad-request/etc. are not and should fail fast.
+_TRANSIENT_LLM_ERRORS = (
+    RateLimitError,
+    APITimeoutError,
+    APIConnectionError,
+    InternalServerError,
+)
+_LLM_RETRY_DELAYS = (2, 4, 8)  # seconds; exponential backoff between retries
+
 
 def _llm_chat(messages: list[dict], _retries: int = 1, max_tokens: int | None = None) -> str:
     """Universal chat helper that works for both OpenAI & Ollama and always returns clean JSON-only content."""
@@ -419,7 +521,31 @@ def _llm_chat(messages: list[dict], _retries: int = 1, max_tokens: int | None = 
         }
 
     def _call(kwargs: dict):
-        return client.chat.completions.create(**kwargs)
+        """
+        Call the chat completion endpoint, retrying transient errors (rate
+        limit, timeout, connection failure, 5xx) with exponential backoff
+        (2s/4s/8s). Non-transient errors (auth, bad request, etc.) propagate
+        on the first failure so the caller's existing fallback/workaround
+        handling still applies without delay.
+        """
+        last_err = None
+        total_attempts = len(_LLM_RETRY_DELAYS) + 1
+        for attempt, delay in enumerate((0,) + _LLM_RETRY_DELAYS, start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                return client.chat.completions.create(**kwargs)
+            except _TRANSIENT_LLM_ERRORS as e:
+                last_err = e
+                if attempt < total_attempts:
+                    logging.warning(
+                        f"[LLM] Transient error ({type(e).__name__}) on attempt "
+                        f"{attempt}/{total_attempts}: {e}. Retrying..."
+                    )
+        logging.error(
+            f"[LLM] Giving up after {total_attempts} attempts due to transient error: {last_err}"
+        )
+        raise last_err
 
     try:
         resp = _call(create_kwargs)
@@ -587,10 +713,15 @@ def filter_library_by_metadata(
     all_songs: list[dict],
     context_song_ids: set[str] = None,
     semantic_song_ids: set[str] = None,
+    era_range: tuple[int, int] = None,
 ) -> list[dict]:
     """
     Filter library based on combined focus items with hierarchical, additive weighting.
     Note that context playlist songs are used only as a vibe/metadata signal and are not scored for direct inclusion.
+
+    `era_range`, when provided, is an inclusive (start_year, end_year) tuple
+    detected from the prompt; it only ever adds a small bonus (see
+    `_era_bonus`) and never filters or excludes songs.
     """
     # Create sets for efficient lookup
     exp_a = set(explicit_artists)
@@ -611,7 +742,7 @@ def filter_library_by_metadata(
     filtered = []
     for s in all_songs:
         song_artists = _split_artist_string(s.get("artist", ""))
-        song_genre = s.get("genre")
+        song_genres = _song_genres(s)
         song_album = s.get("album")
         song_id = s.get("id")
 
@@ -622,7 +753,7 @@ def filter_library_by_metadata(
         # 1. Explicit Matches (+3.0 each)
         if any(a in exp_a for a in song_artists):
             score += 3.0
-        if song_genre in exp_g:
+        if any(g in exp_g for g in song_genres):
             score += 3.0
         if song_album in exp_al:
             score += 3.0
@@ -634,7 +765,7 @@ def filter_library_by_metadata(
         # Metadata matches if part of context
         if any(a in ctx_a for a in song_artists):
             score += 2.0
-        if song_genre in ctx_g:
+        if any(g in ctx_g for g in song_genres):
             score += 2.0
         if song_album in ctx_al:
             score += 2.0
@@ -642,7 +773,7 @@ def filter_library_by_metadata(
         # 3. LLM Chosen Focus Matches
         if any(a in sel_a for a in song_artists):
             score += 1.5
-        if song_genre in sel_g:
+        if any(g in sel_g for g in song_genres):
             score += 1.5
         if song_album in sel_al:
             score += 1.5
@@ -656,6 +787,9 @@ def filter_library_by_metadata(
 
         # 6. Metadata-Based Score (play count, skip count, recency)
         score += calculate_metadata_score(s)
+
+        # 7. Loose era bonus (never a filter; zero effect when no era detected)
+        score += _era_bonus(s.get("releaseYear"), era_range)
 
         if score > 0:
             s_copy = s.copy()
@@ -704,7 +838,7 @@ def generate_playlist_single_call(
         star = "*" if s.get("starred") else ""
         title   = s.get("title")   or "Unknown"
         artist  = s.get("artist")  or "Unknown"
-        genre   = s.get("genre")   or "Unknown"
+        genre   = ", ".join(_song_genres(s)) or "Unknown"
         album   = s.get("album")   or "Unknown"
         year    = s.get("releaseYear") or "Unknown"
         lines.append(f"{n}{star}|{title}|{artist}|{genre}|{album}|{year}")
@@ -1014,29 +1148,6 @@ def fetch_playlist_songs(playlist_id: str) -> list[dict]:
 
 
 # --------------------------------------------------
-# PROMPT ARTIST EXTRACTION
-# --------------------------------------------------
-
-
-def extract_prompt_artists(prompt: str, all_artists: list[str]) -> list[str]:
-    """
-    Detect artist names that appear as whole words (case-insensitive) in the user's prompt.
-    Returns them in library order to preserve stability.
-    """
-    import re
-
-    # Split prompt into words, ignore punctuation
-    words = set(re.findall(r"\b\w+\b", prompt.lower()))
-    result = []
-    for artist in all_artists:
-        artist_words = set(re.findall(r"\b\w+\b", artist.lower()))
-        # If any prompt word is a whole word in the artist name
-        if words & artist_words:
-            result.append(artist)
-    return result
-
-
-# --------------------------------------------------
 # CONTEXT PLAYLIST SELECTION
 # --------------------------------------------------
 
@@ -1310,14 +1421,14 @@ def _enforce_artist_cap(
 
 
 def _sanitize_playlist(
-    entries: List[dict], candidates: List[dict], fuzzy_threshold: int = 90
+    entries: List[dict], candidates: List[dict]
 ) -> List[dict]:
     """
     Ensure each playlist entry has an 'id'. If an entry only has a 'title'
     (and optionally 'artist'), try to resolve the matching song in *candidates*
-    via a case-insensitive title-and-artist match. If that fails, use fuzzy matching
-    on title and artist. Drop any rows we can't resolve. This is backend-agnostic and
-    therefore safe for both Ollama and OpenAI modes.
+    via a case-insensitive title-and-artist match. Drop any rows we can't
+    resolve. This is backend-agnostic and therefore safe for both Ollama and
+    OpenAI modes.
     """
     id_by_pair = {
         (s["title"].lower(), (s.get("artist") or "").lower()): s["id"]
@@ -1335,23 +1446,6 @@ def _sanitize_playlist(
         resolved = id_by_pair.get(key)
         if resolved:
             cleaned.append({"id": resolved, "title": e.get("title")})
-            continue
-        # Fuzzy match fallback using rapidfuzz
-        best_score = 0
-        best_id = None
-        for s in candidates:
-            title_score = fuzz.ratio(
-                (e.get("title") or "").lower(), (s.get("title") or "").lower()
-            )
-            artist_score = fuzz.ratio(
-                (e.get("artist") or "").lower(), (s.get("artist") or "").lower()
-            )
-            avg_score = (title_score + artist_score) // 2
-            if avg_score > best_score and avg_score >= fuzzy_threshold:
-                best_score = avg_score
-                best_id = s["id"]
-        if best_id:
-            cleaned.append({"id": best_id, "title": e.get("title")})
     return cleaned
 
 
@@ -1422,6 +1516,84 @@ def extract_prompt_entities(
             entities["genres"].append(genre)
 
     return entities
+
+
+# --------------------------------------------------
+# PROMPT ERA DETECTION (loose scoring bonus only)
+# --------------------------------------------------
+
+_ERA_RANGE_RE = re.compile(
+    r"\b(19\d{2}|20\d{2})\s*(?:-|to|–|—)\s*(19\d{2}|20\d{2})\b", re.IGNORECASE
+)
+_DECADE_DIGIT_RE = re.compile(r"\b(\d{2,4})s\b", re.IGNORECASE)
+_DECADE_WORDS = {
+    "forties": 1940,
+    "fifties": 1950,
+    "sixties": 1960,
+    "seventies": 1970,
+    "eighties": 1980,
+    "nineties": 1990,
+}
+_DECADE_WORD_RE = re.compile(r"\b(" + "|".join(_DECADE_WORDS) + r")\b", re.IGNORECASE)
+_EXPLICIT_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+
+
+def _decade_digits_to_range(digits: str) -> tuple[int, int] | None:
+    """'1980' -> (1980, 1989); '80' -> (1980, 1989); '20' -> (2020, 2029).
+
+    Only decade-shaped numbers (ending in 0) are treated as a decade;
+    anything else (e.g. a stray "1975s" typo) is not a decade and returns
+    None so the caller can fall through to other detection strategies.
+    """
+    n = int(digits)
+    if n % 10 != 0:
+        return None
+    if len(digits) == 4:
+        start = n
+    elif len(digits) == 2:
+        # Two-digit shorthand: low numbers ("00s", "10s", "20s") read as the
+        # 2000s; higher numbers ("50s".."90s") read as the 1900s.
+        start = (2000 if n < 30 else 1900) + n
+    else:
+        return None
+    return (start, start + 9)
+
+
+def detect_prompt_era(prompt: str) -> tuple[int, int] | None:
+    """
+    Detect an implied era (inclusive start/end year) from a vibe prompt.
+    Handles explicit year ranges ("1975-1980", "1975 to 1980"), decade
+    shorthand ("80s", "1980s"), decade words ("eighties"), and a bare
+    explicit year ("1975") as a fallback. Returns None when no era is
+    implied. Callers must only ever use the result as a loose scoring bonus
+    (see `_era_bonus`), never as a filter.
+    """
+    if not prompt:
+        return None
+    text = prompt.lower()
+
+    m = _ERA_RANGE_RE.search(text)
+    if m:
+        y1, y2 = int(m.group(1)), int(m.group(2))
+        return (min(y1, y2), max(y1, y2))
+
+    m = _DECADE_DIGIT_RE.search(text)
+    if m:
+        rng = _decade_digits_to_range(m.group(1))
+        if rng:
+            return rng
+
+    m = _DECADE_WORD_RE.search(text)
+    if m:
+        start = _DECADE_WORDS[m.group(1).lower()]
+        return (start, start + 9)
+
+    m = _EXPLICIT_YEAR_RE.search(text)
+    if m:
+        year = int(m.group(1))
+        return (year, year)
+
+    return None
 
 
 # --------------------------------------------------
@@ -1500,9 +1672,7 @@ def _main_impl(args):
         sem_albums = [all_albums[i] for i in sem_album_indices]
         # 2. Semantic Song Pre-selection (Top 200)
         print("Finding semantically similar songs...")
-        song_texts = [
-            f"{s.get('title', '')} by {s.get('artist', '')}" for s in all_songs
-        ]
+        song_texts = [_song_embedding_text(s) for s in all_songs]
         sem_song_indices = embedding_manager.find_similar_indices(
             prompt, song_texts, top_k=200
         )
@@ -1533,8 +1703,8 @@ def _main_impl(args):
             if s.get("artist"):
                 for a in _split_artist_string(s["artist"]):
                     art_counts[a] += 1
-            if s.get("genre"):
-                gen_counts[s["genre"]] += 1
+            for g in _song_genres(s):
+                gen_counts[g] += 1
             if s.get("album"):
                 alb_counts[s["album"]] += 1
 
@@ -1548,6 +1718,7 @@ def _main_impl(args):
     explicit_artists = prompt_entities["artists"]
     explicit_genres = prompt_entities["genres"]
     explicit_albums = prompt_entities["albums"]
+    era_range = detect_prompt_era(prompt)
 
     print(f"Context analysis complete ({time.time() - start_t:.1f}s)")
 
@@ -1555,6 +1726,8 @@ def _main_impl(args):
         print(f"Explicit artists identified: {', '.join(explicit_artists)}")
     if explicit_genres:
         print(f"Explicit genres identified: {', '.join(explicit_genres)}")
+    if era_range:
+        print(f"Implied era detected: {era_range[0]}-{era_range[1]} (loose scoring bonus only)")
 
     # ========== STAGE 1: METADATA SELECTION ==========
     start_t = time.time()
@@ -1622,6 +1795,7 @@ def _main_impl(args):
         all_songs=all_songs,
         context_song_ids=context_song_ids,
         semantic_song_ids=semantic_song_ids,
+        era_range=era_range,
     )
     # Collapse variant duplicates (remasters/editions/dupe rips) before the LLM
     # sees the pool, so it can't pick several variants of the same recording.
@@ -1636,11 +1810,6 @@ def _main_impl(args):
     print(
         f"Final candidate pool: {len(candidate_pool)} songs ({time.time() - start_t:.1f}s)"
     )
-
-    if candidate_pool:
-        sample_scores = [
-            (s["title"], s.get("_metadata_score", 0)) for s in candidate_pool[:3]
-        ]
 
     if not candidate_pool:
         print("\nNo songs match the selected criteria. Try a different prompt.")
