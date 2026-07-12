@@ -5,6 +5,7 @@ __pycache__/
 embeddings_cache.pkl
 pipenv/
 *.pkl
+.mb_cache.json
 .DS_Store
 .env
 venv/
