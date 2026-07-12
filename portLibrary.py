@@ -20,7 +20,13 @@ import argparse
 from rapidfuzz import fuzz
 import re
 import unicodedata
+import difflib
 from tqdm import tqdm, trange
+
+# Applied to every outbound HTTP request so a hung server/network doesn't
+# block the script indefinitely (and so bad credentials fail fast instead of
+# looking identical to "no match").
+HTTP_TIMEOUT = 15
 
 # Load secrets from secrets.txt
 secrets = configparser.ConfigParser()
@@ -138,13 +144,54 @@ def fetch_spotify_playlist_image(playlist_id):
     return images[0].get("url") if images else None
 
 
+def _check_subsonic_response(response, context):
+    """
+    Validate an HTTP response from the Subsonic API.
+
+    Checks the HTTP status code and Subsonic's XML `status="failed"` envelope
+    (this API returns XML, not JSON, in this file). Returns the parsed XML
+    root on success, or None (after logging) on failure. Errors are logged
+    distinctly from "no match" results so bad credentials / server errors
+    aren't silently mistaken for missing songs.
+    """
+    try:
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"[Subsonic ERROR] {context}: HTTP error - {e}")
+        return None
+
+    try:
+        root = ET.fromstring(response.content)
+    except ET.ParseError as e:
+        print(f"[Subsonic ERROR] {context}: could not parse XML response - {e}")
+        return None
+
+    if root.get('status') == 'failed':
+        ns = root.tag.split('}')[0] + '}' if '}' in root.tag else ''
+        err = root.find(f"{ns}error")
+        code = err.get('code') if err is not None else '?'
+        message = err.get('message') if err is not None else 'unknown error'
+        print(f"[Subsonic ERROR] {context}: request failed (code {code}): {message}")
+        return None
+
+    return root
+
+
 def set_subsonic_playlist_image(playlist_id, image_url):
+    try:
+        image_resp = requests.get(image_url, timeout=HTTP_TIMEOUT)
+        image_resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"[HTTP ERROR] set_subsonic_playlist_image: failed to fetch image '{image_url}' - {e}")
+        return False
+
     response = requests.post(
         f"{SUBSONIC_BASE_URL}/updatePlaylist",
         params={**SUBSONIC_AUTH_PARAMS, 'playlistId': playlist_id},
-        files={"coverArt": requests.get(image_url).content}
+        files={"coverArt": image_resp.content},
+        timeout=HTTP_TIMEOUT,
     )
-    return response.status_code == 200
+    return _check_subsonic_response(response, context=f"updatePlaylist(coverArt) for playlist {playlist_id}") is not None
 
 
 def search_subsonic_song(song_title, artist_names):
@@ -165,9 +212,12 @@ def search_subsonic_song(song_title, artist_names):
 
     response = requests.get(
         f"{SUBSONIC_BASE_URL}/search3",
-        params={**SUBSONIC_AUTH_PARAMS, 'query': raw_title, 'type': 'song'}
+        params={**SUBSONIC_AUTH_PARAMS, 'query': raw_title, 'type': 'song', 'songCount': 100},
+        timeout=HTTP_TIMEOUT,
     )
-    root = ET.fromstring(response.content)
+    root = _check_subsonic_response(response, context=f"search3 query='{raw_title}'")
+    if root is None:
+        return None
     ns = root.tag.split('}')[0] + '}'
 
     best_match = None
@@ -197,9 +247,12 @@ def search_subsonic_song(song_title, artist_names):
 def get_subsonic_playlist_id(playlist_name):
     response = requests.get(
         f"{SUBSONIC_BASE_URL}/getPlaylists",
-        params=SUBSONIC_AUTH_PARAMS
+        params=SUBSONIC_AUTH_PARAMS,
+        timeout=HTTP_TIMEOUT,
     )
-    root = ET.fromstring(response.content)
+    root = _check_subsonic_response(response, context="getPlaylists")
+    if root is None:
+        return None
     ns = root.tag.split('}')[0] + '}'
     for pl in root.findall(f".//{ns}playlist"):
         if pl.get('name') == playlist_name:
@@ -207,32 +260,74 @@ def get_subsonic_playlist_id(playlist_name):
     return None
 
 
+def get_subsonic_playlist_song_ids(playlist_id):
+    """Return the set of song IDs currently present in a Subsonic playlist."""
+    response = requests.get(
+        f"{SUBSONIC_BASE_URL}/getPlaylist",
+        params={**SUBSONIC_AUTH_PARAMS, 'id': playlist_id},
+        timeout=HTTP_TIMEOUT,
+    )
+    root = _check_subsonic_response(response, context=f"getPlaylist {playlist_id}")
+    if root is None:
+        return None
+    ns = root.tag.split('}')[0] + '}'
+    return {entry.get('id') for entry in root.findall(f".//{ns}entry") if entry.get('id')}
+
+
 def create_or_update_subsonic_playlist(playlist_name, song_ids, description):
     pl_id = get_subsonic_playlist_id(playlist_name)
     if pl_id:
-        resp = requests.get(
-            f"{SUBSONIC_BASE_URL}/createPlaylist",
-            params={**SUBSONIC_AUTH_PARAMS, 'playlistId': pl_id, 'songId': song_ids}
-        )
-        requests.get(
+        # Non-destructive update: only ADD songs that aren't already present.
+        # `createPlaylist` with a `playlistId` REPLACES the entire song list,
+        # which would silently and permanently delete any track that failed
+        # to match on this particular run even though it was correctly
+        # present before. So for an existing playlist we only ever add.
+        existing_ids = get_subsonic_playlist_song_ids(pl_id)
+        if existing_ids is None:
+            # Couldn't read the current contents; adding blindly would
+            # duplicate every song already present, so skip this playlist.
+            print(f"[Subsonic ERROR] could not read existing playlist '{playlist_name}'; skipping update to avoid duplicates")
+            return False
+        new_ids = [sid for sid in song_ids if sid not in existing_ids]
+
+        ok = True
+        if new_ids:
+            add_resp = requests.get(
+                f"{SUBSONIC_BASE_URL}/updatePlaylist",
+                params={**SUBSONIC_AUTH_PARAMS, 'playlistId': pl_id, 'songIdToAdd': new_ids},
+                timeout=HTTP_TIMEOUT,
+            )
+            ok = _check_subsonic_response(add_resp, context=f"updatePlaylist(add) for '{playlist_name}'") is not None
+        else:
+            print(f"  (no new songs to add to existing playlist '{playlist_name}'; leaving contents untouched)")
+
+        comment_resp = requests.get(
             f"{SUBSONIC_BASE_URL}/updatePlaylist",
-            params={**SUBSONIC_AUTH_PARAMS, 'playlistId': pl_id, 'comment': description}
+            params={**SUBSONIC_AUTH_PARAMS, 'playlistId': pl_id, 'comment': description},
+            timeout=HTTP_TIMEOUT,
         )
+        ok = ok and (_check_subsonic_response(comment_resp, context=f"updatePlaylist(comment) for '{playlist_name}'") is not None)
+        return ok
     else:
         resp = requests.get(
             f"{SUBSONIC_BASE_URL}/createPlaylist",
-            params={**SUBSONIC_AUTH_PARAMS, 'name': playlist_name, 'songId': song_ids}
+            params={**SUBSONIC_AUTH_PARAMS, 'name': playlist_name, 'songId': song_ids},
+            timeout=HTTP_TIMEOUT,
         )
-        new_root = ET.fromstring(resp.content)
+        new_root = _check_subsonic_response(resp, context=f"createPlaylist for '{playlist_name}'")
+        if new_root is None:
+            return False
         ns2 = new_root.tag.split('}')[0] + '}'
         new_pl = new_root.find(f".//{ns2}playlist")
         new_id = new_pl.get('id') if new_pl is not None else None
         if new_id:
-            requests.get(
+            comment_resp = requests.get(
                 f"{SUBSONIC_BASE_URL}/updatePlaylist",
-                params={**SUBSONIC_AUTH_PARAMS, 'playlistId': new_id, 'comment': description}
+                params={**SUBSONIC_AUTH_PARAMS, 'playlistId': new_id, 'comment': description},
+                timeout=HTTP_TIMEOUT,
             )
-    return resp.status_code == 200
+            _check_subsonic_response(comment_resp, context=f"updatePlaylist(comment) for '{playlist_name}'")
+        return True
 
 # -------------------
 # Fetch all liked tracks from Spotify
@@ -257,9 +352,10 @@ def star_subsonic_song(song_id: str) -> bool:
     """PUT a star on a Subsonic/Navidrome song."""
     r = requests.get(
         f"{SUBSONIC_BASE_URL}/star",
-        params={**SUBSONIC_AUTH_PARAMS, "id": song_id}
+        params={**SUBSONIC_AUTH_PARAMS, "id": song_id},
+        timeout=HTTP_TIMEOUT,
     )
-    return r.status_code == 200
+    return _check_subsonic_response(r, context=f"star song {song_id}") is not None
 
 # -------------------
 # Increment play-count on Subsonic/Navidrome
@@ -267,10 +363,12 @@ def star_subsonic_song(song_id: str) -> bool:
 def scrobble_subsonic(song_id: str, count: int = 1):
     """Increment play-count by calling /scrobble N times (optional)."""
     for _ in range(count):
-        requests.get(
+        r = requests.get(
             f"{SUBSONIC_BASE_URL}/scrobble",
-            params={**SUBSONIC_AUTH_PARAMS, "id": song_id, "submission": "true"}
+            params={**SUBSONIC_AUTH_PARAMS, "id": song_id, "submission": "true"},
+            timeout=HTTP_TIMEOUT,
         )
+        _check_subsonic_response(r, context=f"scrobble song {song_id}")
 
 # -------------------
 # Sync Spotify likes and play counts to Subsonic/Navidrome
@@ -309,8 +407,14 @@ def sync_likes_and_playcounts():
 
 def fetch_subsonic_starred_songs():
     """Return list of dicts with keys title, artist for all starred songs on Subsonic/Navidrome."""
-    r = requests.get(f"{SUBSONIC_BASE_URL}/getStarred2", params=SUBSONIC_AUTH_PARAMS)
-    root = ET.fromstring(r.content)
+    r = requests.get(
+        f"{SUBSONIC_BASE_URL}/getStarred2",
+        params=SUBSONIC_AUTH_PARAMS,
+        timeout=HTTP_TIMEOUT,
+    )
+    root = _check_subsonic_response(r, context="getStarred2")
+    if root is None:
+        return []
     ns = root.tag.split("}")[0] + "}"
     songs = []
     for song in root.findall(f".//{ns}song"):
@@ -321,13 +425,48 @@ def fetch_subsonic_starred_songs():
     return songs
 
 
+def _is_reasonable_spotify_match(query_title, query_artist, track, threshold=0.6):
+    """
+    Sanity-check a Spotify search result against the query before accepting
+    it. Spotify's search can return the top hit for a totally different song
+    when nothing close exists, so we fuzzy-compare normalized title/artist
+    (stdlib difflib) rather than trusting items[0] blindly.
+    """
+    result_title = normalize_text(track.get("name", ""))
+    result_artist = normalize_text(
+        ", ".join(a.get("name", "") for a in track.get("artists", []))
+    )
+    q_title = normalize_text(clean_song_title(query_title))
+    q_artist = normalize_text(clean_song_title(query_artist.split(",")[0]))
+
+    title_ratio = difflib.SequenceMatcher(None, q_title, result_title).ratio()
+    artist_ratio = (
+        difflib.SequenceMatcher(None, q_artist, result_artist).ratio()
+        if q_artist else 1.0
+    )
+
+    return title_ratio >= threshold and artist_ratio >= threshold
+
+
 def search_spotify_track(title, artist):
     query = f"track:{clean_song_title(title)} artist:{artist.split(',')[0]}"
     try:
         res = sp.search(q=query, type="track", limit=1)
         items = res.get("tracks", {}).get("items", [])
-        return items[0]["id"] if items else None
-    except Exception:
+        if not items:
+            return None
+        candidate = items[0]
+        if not _is_reasonable_spotify_match(title, artist, candidate):
+            cand_title = candidate.get("name", "?")
+            cand_artist = ", ".join(a.get("name", "?") for a in candidate.get("artists", []))
+            print(
+                f"[Spotify] Rejected weak match: searched for '{title}' by '{artist}', "
+                f"top result was '{cand_title}' by '{cand_artist}'"
+            )
+            return None
+        return candidate["id"]
+    except Exception as e:
+        print(f"[Spotify ERROR] search failed for '{title}' by '{artist}': {e}")
         return None
 
 
@@ -353,8 +492,11 @@ def fetch_subsonic_playlist(playlist_id):
     r = requests.get(
         f"{SUBSONIC_BASE_URL}/getPlaylist",
         params={**SUBSONIC_AUTH_PARAMS, "id": playlist_id},
+        timeout=HTTP_TIMEOUT,
     )
-    root = ET.fromstring(r.content)
+    root = _check_subsonic_response(r, context=f"getPlaylist {playlist_id}")
+    if root is None:
+        return []
     ns = root.tag.split("}")[0] + "}"
     tracks = []
     for entry in root.findall(f".//{ns}entry"):
@@ -375,8 +517,15 @@ def sync_playlists_to_spotify() -> None:
     print("\n▶ Syncing server playlists ➜ Spotify (title‑centric dedupe)…")
 
     # 1️⃣ Gather server playlists
-    resp = requests.get(f"{SUBSONIC_BASE_URL}/getPlaylists", params=SUBSONIC_AUTH_PARAMS)
-    root = ET.fromstring(resp.content)
+    resp = requests.get(
+        f"{SUBSONIC_BASE_URL}/getPlaylists",
+        params=SUBSONIC_AUTH_PARAMS,
+        timeout=HTTP_TIMEOUT,
+    )
+    root = _check_subsonic_response(resp, context="getPlaylists")
+    if root is None:
+        print("  Could not fetch server playlists; aborting sync.")
+        return
     ns = root.tag.split("}")[0] + "}"
     server_pls = {pl.get("name"): pl.get("id") for pl in root.findall(f".//{ns}playlist")}
 
