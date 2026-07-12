@@ -126,6 +126,131 @@ def _split_artist_string(artist_string: str) -> list[str]:
     return artists
 
 
+# --------------------------------------------------
+# VARIANT DEDUP HELPERS
+# --------------------------------------------------
+# Collapse duplicate variants of the same recording (remasters, editions,
+# bonus-track tags, feat. tags, duplicate rips across albums). Live versions
+# are treated as DISTINCT recordings (is_live is part of the dedup key), so a
+# live cut never collapses onto its studio counterpart, but two live variants
+# of the same song do collapse together.
+
+# A trailing "( ... )" / "[ ... ]" group or "- ..." dash segment is only
+# stripped when its *entire* inner text is one of these recognised suffix
+# markers. This is deliberately conservative so real titles like
+# "(Don't Fear) The Reaper" are never touched.
+_SUFFIX_MARKER_RE = re.compile(
+    r"^\s*(?:"
+    r"\d{0,4}\s*re-?master(?:ed)?(?:\s+\d{2,4})?"        # Remaster/Remastered, 2019 Remaster, Remastered 2019
+    r"|(?:deluxe|anniversary|expanded|special|collector'?s|legacy|super\s+deluxe)(?:\s+edition)?"
+    r"|deluxe\s+version"
+    r"|single\s+version"
+    r"|album\s+version"
+    r"|(?:radio|extended)\s+(?:edit|version|mix)"
+    r"|mono(?:\s+version)?"
+    r"|stereo(?:\s+version)?"
+    r"|bonus\s+track"
+    r"|re-?recorded(?:\s+version)?"
+    r"|(?:feat|ft|featuring)\.?\s+.+"                     # trailing feat. / ft. / featuring ...
+    r"|live\b.*"                                          # any live marker text
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+_TRAILING_PAREN_RE = re.compile(r"\s*[\(\[]([^\(\)\[\]]*)[\)\]]\s*$")
+_TRAILING_DASH_RE = re.compile(r"\s*-\s+([^-]*?)\s*$")
+
+
+def _is_remaster(title: str) -> bool:
+    """True if the title carries a remaster marker (used for variant preference)."""
+    return bool(re.search(r"re-?master", title or "", re.IGNORECASE))
+
+
+def _is_live(title: str) -> bool:
+    """Detect live-performance markers: '(Live', '[Live', '- Live', 'Live at ...'."""
+    t = title or ""
+    if re.search(r"[\(\[]\s*live\b", t, re.IGNORECASE):
+        return True
+    if re.search(r"-\s*live\b", t, re.IGNORECASE):
+        return True
+    if re.search(r"\blive\s+at\b", t, re.IGNORECASE):
+        return True
+    return False
+
+
+def _strip_edition_suffixes(title: str) -> str:
+    """
+    Iteratively strip recognised trailing edition/version/live/feat suffixes
+    (parenthetical, bracketed, or dash-led). Only recognised markers are
+    removed; arbitrary parentheses are left intact.
+    """
+    t = title or ""
+    prev = None
+    while t != prev:
+        prev = t
+        m = _TRAILING_PAREN_RE.search(t)
+        if m and _SUFFIX_MARKER_RE.match(m.group(1)):
+            t = t[: m.start()].strip()
+            continue
+        m = _TRAILING_DASH_RE.search(t)
+        if m and _SUFFIX_MARKER_RE.match(m.group(1)):
+            t = t[: m.start()].strip()
+            continue
+    return t
+
+
+def _normalize_title(title: str) -> str:
+    """
+    Normalise a track title for variant matching: strip recognised suffixes,
+    lowercase, drop punctuation, and collapse whitespace.
+    """
+    t = _strip_edition_suffixes(title or "")
+    t = t.lower()
+    t = re.sub(r"[^\w\s]", " ", t)  # punctuation-insensitive
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _variant_dedup_key(song: dict) -> tuple:
+    """Dedup key: (normalized_title, primary_artist_lower, is_live)."""
+    title = song.get("title") or ""
+    artists = _split_artist_string(song.get("artist") or "")
+    primary = artists[0].lower() if artists else ""
+    return (_normalize_title(title), primary, _is_live(title))
+
+
+def _variant_preferred(a: dict, b: dict) -> bool:
+    """
+    Return True if variant *a* should be preferred over *b* when collapsing a
+    group. Preference: starred > remastered > higher playCount > arbitrary.
+    """
+    a_star, b_star = bool(a.get("starred")), bool(b.get("starred"))
+    if a_star != b_star:
+        return a_star
+    a_rm, b_rm = _is_remaster(a.get("title") or ""), _is_remaster(b.get("title") or "")
+    if a_rm != b_rm:
+        return a_rm
+    a_pc, b_pc = a.get("playCount") or 0, b.get("playCount") or 0
+    if a_pc != b_pc:
+        return a_pc > b_pc
+    return False
+
+
+def _dedup_variants(songs: list[dict]) -> list[dict]:
+    """
+    Collapse variant duplicates in *songs*, keeping the preferred representative
+    of each group. First-appearance order is preserved (no reordering).
+    """
+    best: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for s in songs:
+        k = _variant_dedup_key(s)
+        if k not in best:
+            best[k] = s
+            order.append(k)
+        elif _variant_preferred(s, best[k]):
+            best[k] = s
+    return [best[k] for k in order]
 
 
 def calculate_metadata_score(song: dict) -> float:
@@ -586,6 +711,14 @@ def generate_playlist_single_call(
     candidate_text = "\n".join(lines)
 
     # -- 3. System prompt --------------------------------------------------
+    if explicit_artists:
+        explicit_line = (
+            f"- The user specifically requested these artists: {', '.join(explicit_artists)}. "
+            "Strongly prefer songs by them and do NOT enforce artist diversity against them.\n"
+        )
+    else:
+        explicit_line = "- Ensure artist diversity; avoid over-representing any single artist.\n"
+
     system_msg = {
         "role": "system",
         "content": (
@@ -597,7 +730,7 @@ def generate_playlist_single_call(
             "- Pick ONLY numbers that appear in the provided list.\n"
             "- Maximize artist and album diversity.\n"
             "- Slightly prefer starred songs if they fit.\n"
-            "- Ensure artist diversity unless specific artists were requested.\n"
+            f"{explicit_line}"
             "- STRICTLY return ONLY a JSON object with a single key \"picks\" whose value "
             "is an array of the selected candidate numbers (integers). Example:\n"
             '  {"picks": [3, 12, 44, 1, 27]}\n'
@@ -657,7 +790,9 @@ def generate_playlist_single_call(
 
     # Pad if needed
     if len(playlist) < min_songs:
-        playlist = ensure_min_songs(playlist, filtered_songs, min_songs)
+        playlist = ensure_min_songs(
+            playlist, filtered_songs, min_songs, explicit_artists=explicit_artists
+        )
 
     return playlist
 
@@ -721,9 +856,16 @@ def generate_playlist_chunked(
             all_selections.extend(chunk_playlist)
         except Exception as e:
             print(f"[WARN] Chunk {i + 1} failed: {e}")
-            # Fallback: take top-scored songs from this chunk
+            # Fallback: take the highest-relevance songs from this chunk
+            # (chunk was shuffled above), with minor tie-breaking randomness.
+            fallback_pool = sorted(
+                chunk,
+                key=lambda s: (s.get("_relevance_score", 0), random.random()),
+                reverse=True,
+            )
             fallback = [
-                {"id": s["id"], "title": s["title"]} for s in chunk[:chunk_target]
+                {"id": s["id"], "title": s["title"]}
+                for s in fallback_pool[:chunk_target]
             ]
             all_selections.extend(fallback)
 
@@ -738,7 +880,7 @@ def generate_playlist_chunked(
     # If we don't have enough, pad with top-scored unused songs
     if len(unique_selections) < min_songs:
         unique_selections = ensure_min_songs(
-            unique_selections, filtered_songs, min_songs
+            unique_selections, filtered_songs, min_songs, explicit_artists=explicit_artists
         )
 
     return unique_selections[:min_songs]
@@ -1001,18 +1143,165 @@ def select_context_playlist_songs(
 
 
 def ensure_min_songs(
-    playlist: list[dict], candidates: list[dict], min_songs: int, max_songs: int = 50
+    playlist: list[dict],
+    candidates: list[dict],
+    min_songs: int,
+    max_songs: int = 50,
+    explicit_artists: list[str] = None,
 ) -> list[dict]:
+    """
+    Pad *playlist* up to *min_songs* using the highest-relevance unused
+    candidates (descending `_relevance_score`, with only minor tie-breaking
+    randomness). Padding respects the variant-dedup rules and, when no explicit
+    artists were requested, the adaptive per-artist cap.
+    """
     if len(playlist) >= min_songs:
         return playlist[:max_songs]
     needed = min(min_songs - len(playlist), max_songs - len(playlist))
-    remaining = [s for s in candidates if s["id"] not in {p["id"] for p in playlist}]
-    random.shuffle(remaining)
-    playlist.extend({"id": s["id"], "title": s["title"]} for s in remaining[:needed])
+
+    id_lookup = {s["id"]: s for s in candidates}
+    existing_ids = {p["id"] for p in playlist}
+
+    # Seed dedup keys and per-artist counts from the current playlist.
+    existing_keys: set[tuple] = set()
+    artist_counts: Counter = Counter()
+    for p in playlist:
+        full = id_lookup.get(p["id"])
+        if full:
+            existing_keys.add(_variant_dedup_key(full))
+            a = _split_artist_string(full.get("artist") or "")
+            artist_counts[a[0].lower() if a else ""] += 1
+
+    cap = None if explicit_artists else max(2, math.ceil(0.15 * min_songs))
+
+    remaining = [s for s in candidates if s["id"] not in existing_ids]
+    # Descending relevance, minor tie-breaking randomness only.
+    remaining.sort(
+        key=lambda s: (s.get("_relevance_score", 0), random.random()), reverse=True
+    )
+
+    added = 0
+    for s in remaining:
+        if added >= needed:
+            break
+        k = _variant_dedup_key(s)
+        if k in existing_keys:
+            continue
+        a = _split_artist_string(s.get("artist") or "")
+        pa = a[0].lower() if a else ""
+        if cap is not None and artist_counts[pa] >= cap:
+            continue
+        playlist.append({"id": s["id"], "title": s.get("title")})
+        existing_keys.add(k)
+        artist_counts[pa] += 1
+        added += 1
+
     print(
-        f"Added {len(remaining[:needed])} random songs from filtered options to reach minimum length of {min_songs}."
+        f"Added {added} relevance-ranked songs from filtered options to reach minimum length of {min_songs}."
     )
     return playlist[:max_songs]
+
+
+def _dedup_playlist_variants(
+    playlist: list[dict], id_lookup: dict[str, dict]
+) -> list[dict]:
+    """
+    Final safety pass: collapse any variant duplicates in an assembled playlist.
+    Entries are enriched from *id_lookup* (id -> full song dict) so the variant
+    key has artist/starred/playCount data; entries not found are kept as-is.
+    """
+    enriched = [id_lookup.get(item["id"], item) for item in playlist]
+    deduped = _dedup_variants(enriched)
+    return [{"id": s["id"], "title": s.get("title")} for s in deduped]
+
+
+def _enforce_artist_cap(
+    playlist: list[dict],
+    candidates: list[dict],
+    target_size: int,
+    explicit_artists: list[str] = None,
+) -> list[dict]:
+    """
+    Adaptive post-selection per-artist cap. Only applies when *explicit_artists*
+    is empty (deliberate 1-2 artist mixes are never capped). Cap =
+    max(2, ceil(0.15 * target_size)). Songs over the cap for an artist (keeping
+    the highest-relevance ones) are replaced by the highest-relevance unused
+    candidates from other artists, respecting the dedup rules and the cap.
+    """
+    if explicit_artists:
+        return playlist
+
+    cap = max(2, math.ceil(0.15 * target_size))
+    id_lookup = {s["id"]: s for s in candidates}
+
+    def primary_artist(song_or_item: dict) -> str:
+        full = id_lookup.get(song_or_item.get("id"), song_or_item)
+        a = _split_artist_string(full.get("artist") or "")
+        return a[0].lower() if a else ""
+
+    def relscore(item: dict) -> float:
+        return id_lookup.get(item.get("id"), {}).get("_relevance_score", 0)
+
+    # Decide which picks to keep per artist: highest relevance up to the cap.
+    from collections import defaultdict
+
+    by_artist: dict[str, list[dict]] = defaultdict(list)
+    for item in playlist:
+        by_artist[primary_artist(item)].append(item)
+
+    keep_ids: set[str] = set()
+    for _artist, items in by_artist.items():
+        items_sorted = sorted(items, key=relscore, reverse=True)
+        for it in items_sorted[:cap]:
+            keep_ids.add(it["id"])
+
+    kept: list[dict] = []
+    kept_ids: set[str] = set()
+    artist_counts: Counter = Counter()
+    existing_keys: set[tuple] = set()
+    removed = 0
+    for item in playlist:  # preserve original order for the retained picks
+        if item["id"] in keep_ids:
+            kept.append(item)
+            kept_ids.add(item["id"])
+            artist_counts[primary_artist(item)] += 1
+            full = id_lookup.get(item["id"])
+            if full:
+                existing_keys.add(_variant_dedup_key(full))
+        else:
+            removed += 1
+
+    if removed == 0:
+        return kept
+
+    # Backfill removed slots with the best-scoring alternatives from other
+    # artists, respecting the cap and dedup rules.
+    target_len = len(playlist)
+    pool = sorted(
+        candidates,
+        key=lambda s: (s.get("_relevance_score", 0), random.random()),
+        reverse=True,
+    )
+    for s in pool:
+        if len(kept) >= target_len:
+            break
+        if s["id"] in kept_ids:
+            continue
+        pa = primary_artist(s)
+        if artist_counts[pa] >= cap:
+            continue
+        k = _variant_dedup_key(s)
+        if k in existing_keys:
+            continue
+        kept.append({"id": s["id"], "title": s.get("title")})
+        kept_ids.add(s["id"])
+        artist_counts[pa] += 1
+        existing_keys.add(k)
+
+    print(
+        f"Artist cap ({cap}/artist) enforced: replaced {removed} over-cap pick(s)."
+    )
+    return kept
 
 
 # --------------------------------------------------
@@ -1334,6 +1623,16 @@ def _main_impl(args):
         context_song_ids=context_song_ids,
         semantic_song_ids=semantic_song_ids,
     )
+    # Collapse variant duplicates (remasters/editions/dupe rips) before the LLM
+    # sees the pool, so it can't pick several variants of the same recording.
+    pre_dedup = len(candidate_pool)
+    candidate_pool = _dedup_variants(candidate_pool)
+    if len(candidate_pool) < pre_dedup:
+        print(
+            f"Variant dedup: collapsed {pre_dedup - len(candidate_pool)} duplicate "
+            f"variant(s) -> {len(candidate_pool)} candidates."
+        )
+
     print(
         f"Final candidate pool: {len(candidate_pool)} songs ({time.time() - start_t:.1f}s)"
     )
@@ -1367,6 +1666,29 @@ def _main_impl(args):
     if not playlist_items:
         print("\nFailed to generate playlist.")
         return
+
+    # ========== STAGE 3b: POST-SELECTION QUALITY PASSES ==========
+    id_lookup = {s["id"]: s for s in candidate_pool}
+
+    # Final variant-dedup safety pass (in case padding reintroduced a variant).
+    before = len(playlist_items)
+    playlist_items = _dedup_playlist_variants(playlist_items, id_lookup)
+    if len(playlist_items) < before:
+        print(f"Final dedup pass: removed {before - len(playlist_items)} variant duplicate(s).")
+
+    # Adaptive per-artist cap (only when no explicit artists were requested).
+    playlist_items = _enforce_artist_cap(
+        playlist_items, candidate_pool, args.min_songs, explicit_artists
+    )
+
+    # Top up if the quality passes dropped us below the requested minimum.
+    if len(playlist_items) < args.min_songs:
+        playlist_items = ensure_min_songs(
+            playlist_items,
+            candidate_pool,
+            args.min_songs,
+            explicit_artists=explicit_artists,
+        )
 
     # ========== STAGE 4: UPLOAD TO SERVER ==========
     start_t = time.time()
