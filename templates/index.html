@@ -98,8 +98,8 @@
                             <div class="mb-3">
                                 <label class="form-label">OpenAI API Key</label>
                                 <input type="password" class="form-control" name="openai.openai_key"
-                                    value="{{ config.get('openai', 'openai_key', fallback='') }}" data-section="openai"
-                                    data-key="openai_key">
+                                    data-section="openai" data-key="openai_key"
+                                    placeholder="{% if secret_flags.get('openai.openai_key') %}•••••••• (leave blank to keep current key){% else %}enter your OpenAI API key{% endif %}">
                             </div>
                         </div>
 
@@ -117,8 +117,8 @@
                             <div class="mb-3">
                                 <label class="form-label">API Key (Optional)</label>
                                 <input type="password" class="form-control" name="ollama.api_key"
-                                    value="{{ config.get('ollama', 'api_key', fallback='') }}" data-section="ollama"
-                                    data-key="api_key" placeholder="Leave blank for local Ollama">
+                                    data-section="ollama" data-key="api_key"
+                                    placeholder="{% if secret_flags.get('ollama.api_key') %}•••••••• (leave blank to keep current key){% else %}leave blank for local Ollama{% endif %}">
                                 <small class="form-text text-muted">Required for Open WebUI (generate in Settings >
                                     Account > API Keys). Optional for local Ollama without authentication.</small>
                             </div>
@@ -135,8 +135,8 @@
                             <div class="mb-3">
                                 <label class="form-label">Custom API Key</label>
                                 <input type="password" class="form-control" name="custom.api_key"
-                                    value="{{ config.get('custom', 'api_key', fallback='') }}" data-section="custom"
-                                    data-key="api_key">
+                                    data-section="custom" data-key="api_key"
+                                    placeholder="{% if secret_flags.get('custom.api_key') %}•••••••• (leave blank to keep current key){% else %}enter your custom API key{% endif %}">
                             </div>
                         </div>
 
@@ -146,10 +146,17 @@
                         <div class="config-section mb-2">
                             <h5>{{ section }}</h5>
                             {% for key, value in config[section].items() %}
+                            {% set full_key = section ~ '.' ~ key %}
                             <div class="mb-3">
                                 <label class="form-label">{{ key }}</label>
-                                <input type="text" class="form-control" name="{{ section }}.{{ key }}"
+                                {% if full_key in secret_flags %}
+                                <input type="password" class="form-control" name="{{ full_key }}"
+                                    data-section="{{ section }}" data-key="{{ key }}"
+                                    placeholder="{% if secret_flags[full_key] %}•••••••• (leave blank to keep current value){% else %}not set{% endif %}">
+                                {% else %}
+                                <input type="text" class="form-control" name="{{ full_key }}"
                                     value="{{ value }}" data-section="{{ section }}" data-key="{{ key }}">
+                                {% endif %}
                             </div>
                             {% endfor %}
                         </div>
@@ -183,13 +190,26 @@
                             <span class="mb-0"><b>dj options</b></span>
                         </div>
                         <div class="row mb-3 dj-fields-row collapse" id="djOptionsCollapse">
-                            <div class="col-md-6 mb-2 mb-md-0">
+                            <div class="col-md-3 mb-2 mb-md-0">
                                 <label class="form-label">playlist name</label>
                                 <input type="text" class="form-control" name="playlist_name" value="naviDJ">
                             </div>
-                            <div class="col-md-6 mb-2 mb-md-0">
+                            <div class="col-md-3 mb-2 mb-md-0">
                                 <label class="form-label">min. songs</label>
                                 <input type="number" class="form-control" name="min_songs" value="35">
+                            </div>
+                            <div class="col-md-3 mb-2 mb-md-0">
+                                <label class="form-label">llm mode override</label>
+                                <select class="form-control" name="llm_mode">
+                                    <option value="">(use configured default)</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="ollama">Ollama</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3 mb-2 mb-md-0">
+                                <label class="form-label">llm model override</label>
+                                <input type="text" class="form-control" name="llm_model"
+                                    placeholder="leave blank for default">
                             </div>
                         </div>
                     </div>
@@ -198,11 +218,30 @@
                             <label class="form-label">what vibe are you going for?</label>
                             <textarea class="form-control" name="prompt" rows="4" required id="djPromptInput"
                                 style="font-size:1.2em; min-height:90px;"></textarea>
+                            <div id="djPromptHistory" class="prompt-history d-none"></div>
                         </div>
                     </div>
-                    <button type="submit" class="btn btn-primary"><b>generate your mix</b></button>
+                    <div class="d-flex gap-2 align-items-center">
+                        <button type="submit" class="btn btn-primary" id="djSubmitBtn"><b>generate your mix</b></button>
+                        <button type="button" class="btn btn-outline-danger d-none" id="djCancelBtn">cancel</button>
+                    </div>
                 </form>
-                <div class="output-container d-none" id="djOutput"></div>
+
+                <div id="djProgressPanel" class="dj-panel d-none">
+                    <h6>progress</h6>
+                    <ul id="djStageList" class="stage-list"></ul>
+                    <div id="djStats" class="dj-stats"></div>
+                </div>
+
+                <div id="djResultPanel" class="dj-panel d-none">
+                    <h6 id="djResultHeading">tracklist</h6>
+                    <ol id="djTrackList" class="track-list"></ol>
+                </div>
+
+                <div class="mt-2">
+                    <a href="#" id="djRawLogToggle" class="raw-log-toggle">show raw log &#9656;</a>
+                    <div class="output-container d-none" id="djOutput"></div>
+                </div>
             </div>
 
             <!-- Library Tab -->

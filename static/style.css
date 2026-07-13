@@ -295,3 +295,106 @@ h1, h5, .card-header, .nav-link.active {
 #playlistList .form-check-label {
     color: #e0e0e0;
 }
+
+/* naviDJ structured progress & tracklist */
+.dj-panel {
+    background: #181824;
+    border: 1px solid #3a3a5a;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-top: 16px;
+}
+.dj-panel h6 {
+    color: #43e97b;
+    font-weight: 700;
+    margin-bottom: 10px;
+}
+.stage-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 10px 0;
+}
+.stage-item {
+    display: flex;
+    align-items: center;
+    padding: 3px 0;
+    color: #6f6f9a;
+    font-size: 0.92em;
+}
+.stage-item .stage-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #3a3a5a;
+    margin-right: 10px;
+    flex-shrink: 0;
+}
+.stage-item.stage-done {
+    color: #a259f7;
+}
+.stage-item.stage-done .stage-dot {
+    background: #a259f7;
+}
+.stage-item.stage-active {
+    color: #43e97b;
+    font-weight: 700;
+}
+.stage-item.stage-active .stage-dot {
+    background: #43e97b;
+    box-shadow: 0 0 6px #43e97b;
+}
+.dj-stats {
+    font-size: 0.85em;
+    color: #d4d4d4;
+    border-top: 1px solid #2d2d44;
+    padding-top: 8px;
+}
+.dj-stats div {
+    padding: 2px 0;
+}
+.track-list {
+    margin: 0;
+    padding-left: 1.4em;
+    color: #e0e0e0;
+    font-size: 0.95em;
+}
+.track-list li {
+    padding: 3px 0;
+}
+.raw-log-toggle {
+    display: inline-block;
+    color: #a259f7;
+    font-size: 0.85em;
+    text-decoration: none;
+    cursor: pointer;
+}
+.raw-log-toggle:hover {
+    color: #43e97b;
+}
+.log-error {
+    color: #ff6b6b;
+    font-weight: 700;
+}
+.prompt-history {
+    margin-top: 8px;
+    font-size: 0.85em;
+    color: #8888aa;
+}
+.prompt-history-label {
+    color: #8888aa;
+    margin-right: 6px;
+}
+.prompt-chip {
+    background: #232336;
+    border: 1px solid #3a3a5a;
+    color: #d4d4d4;
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 0.85em;
+    margin: 2px 2px;
+    cursor: pointer;
+}
+.prompt-chip:hover {
+    border-color: #43e97b;
+    color: #43e97b;
+}

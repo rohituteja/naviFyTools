@@ -1610,8 +1610,10 @@ def _main_impl(args):
 
     print("=== NaviDJ - AI Playlist Generator ===")
     print("=" * 60)
+    print(f"Using LLM backend: {LLM_MODE} (model: {LLM_MODEL})")
 
     # ========== STAGE 0: LIBRARY FETCH ==========
+    print("STAGE: Fetching Library")
     start_t = time.time()
     all_songs = fetch_all_subsonic_songs()
     if not all_songs:
@@ -1622,6 +1624,7 @@ def _main_impl(args):
     )
 
     # ========== STAGE 1: METADATA GATHERING ==========
+    print("STAGE: Gathering Metadata")
     start_t = time.time()
     all_artists = fetch_all_artists()
     all_genres = fetch_all_genres()
@@ -1641,6 +1644,7 @@ def _main_impl(args):
 
 
     # ========== SEMANTIC PRE-FILTERING (OPTIONAL) ==========
+    print("STAGE: Semantic Pre-filtering")
     start_t = time.time()
     sem_artists = all_artists
     sem_genres = all_genres
@@ -1685,6 +1689,7 @@ def _main_impl(args):
         print("Skipping semantic pre-filtering (no embedding manager initialized).")
 
     # ========== CONTEXT ANALYSIS ==========
+    print("STAGE: Context Analysis")
     start_t = time.time()
     existing_playlists = fetch_all_playlists(exclude_name=playlist_name)
     context_songs = select_context_playlist_songs(
@@ -1730,6 +1735,7 @@ def _main_impl(args):
         print(f"Implied era detected: {era_range[0]}-{era_range[1]} (loose scoring bonus only)")
 
     # ========== STAGE 1: METADATA SELECTION ==========
+    print("STAGE: Selecting Focus Metadata")
     start_t = time.time()
     if embedding_manager is not None:
         print("Skipping LLM metadata selection; using semantically derived candidates.")
@@ -1779,6 +1785,7 @@ def _main_impl(args):
     print(f"Metadata selection complete ({duration:.1f}s)")
 
     # ========== STAGE 2: WEIGHTED METADATA FILTER ==========
+    print("STAGE: Filtering Candidates")
     start_t = time.time()
     context_song_ids = {s["id"] for s in context_songs} if context_songs else set()
 
@@ -1816,6 +1823,7 @@ def _main_impl(args):
         return
 
     # ========== STAGE 3: PLAYLIST GENERATION ==========
+    print("STAGE: Generating Playlist")
     start_t = time.time()
     print(f"Generating playlist...")
     playlist_items = generate_playlist_chunked(
@@ -1837,6 +1845,7 @@ def _main_impl(args):
         return
 
     # ========== STAGE 3b: POST-SELECTION QUALITY PASSES ==========
+    print("STAGE: Finalizing Playlist")
     id_lookup = {s["id"]: s for s in candidate_pool}
 
     # Final variant-dedup safety pass (in case padding reintroduced a variant).
@@ -1859,7 +1868,30 @@ def _main_impl(args):
             explicit_artists=explicit_artists,
         )
 
+    # ========== STRUCTURED OUTPUT FOR FRONTEND ==========
+    # One machine-readable line the web UI can pick out of the raw log to
+    # render the final tracklist. Full song data (artist/album/genres/year)
+    # is pulled from id_lookup, which already maps candidate ids -> full
+    # song dicts. Output-only; does not affect selection.
+    playlist_tracks = []
+    for _item in playlist_items:
+        _full = id_lookup.get(_item.get("id"), {})
+        playlist_tracks.append(
+            {
+                "title": _full.get("title") or _item.get("title"),
+                "artist": _full.get("artist"),
+                "album": _full.get("album"),
+                "genres": _song_genres(_full) if _full else [],
+                "year": _full.get("releaseYear"),
+            }
+        )
+    print(
+        "PLAYLIST_JSON: "
+        + json.dumps({"playlist_name": playlist_name, "tracks": playlist_tracks})
+    )
+
     # ========== STAGE 4: UPLOAD TO SERVER ==========
+    print("STAGE: Uploading to Server")
     start_t = time.time()
     song_ids = [t["id"] for t in playlist_items]
     success = _update_playlist_on_server(playlist_name, song_ids, prompt)
@@ -1871,6 +1903,7 @@ def _main_impl(args):
     else:
         print("ERROR: Failed to update playlist on server.")
 
+    print("STAGE: Complete")
     print("\nComplete!")
     print("=" * 60)
 

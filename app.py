@@ -24,32 +24,76 @@ import portLibrary
 # Global queue for script output
 output_queues = {}
 
+# Popen handles for currently-running naviDJ subprocesses, keyed by task_id,
+# so a run can be cancelled from the browser (see /cancel_dj/<task_id>).
+dj_processes = {}
+
+# Config keys (case-insensitive, matched by key name regardless of section)
+# that hold secret values. These are never sent to the browser and are only
+# overwritten on save if the submitted value is non-blank.
+SECRET_KEY_NAMES = {"openai_key", "api_key", "password", "client_secret"}
+
+
+def is_secret_key(key):
+    return (key or "").lower() in SECRET_KEY_NAMES
+
+
 def read_secrets():
     secrets = configparser.ConfigParser()
     secrets.read('secrets.txt')
     return secrets
 
-def write_secrets(config_data):
-    secrets = configparser.ConfigParser()
-    current = read_secrets()  # Read existing config
-    
-    # Update with new values while preserving existing structure
-    for section in current.sections():
-        if section not in secrets:
-            secrets.add_section(section)
-        for key in current[section]:
-            if section in config_data and key in config_data[section]:
-                secrets[section][key] = config_data[section][key]
+
+def masked_secrets():
+    """
+    Build a safe-for-the-browser view of secrets.txt: secret values (API keys,
+    passwords, client secrets - see SECRET_KEY_NAMES) are never included, only
+    a boolean flag ("<section>.<key>") indicating whether one is currently
+    configured. Non-secret settings pass through unchanged.
+    """
+    secrets = read_secrets()
+    masked = configparser.ConfigParser()
+    flags = {}
+    for section in secrets.sections():
+        masked.add_section(section)
+        for key, value in secrets[section].items():
+            if is_secret_key(key):
+                flags[f"{section}.{key}"] = bool(value)
+                masked[section][key] = ""
             else:
-                secrets[section][key] = current[section][key]
-    
-    # Add new sections if they don't exist
-    for section in config_data:
-        if section not in secrets:
+                masked[section][key] = value
+    return masked, flags
+
+
+def write_secrets(config_data):
+    """
+    Merge submitted config into secrets.txt. Secret fields (see
+    is_secret_key) are only overwritten when the submitted value is
+    non-blank - the browser never receives real secret values, so a blank
+    submission means "leave this one alone", not "clear it". Non-secret
+    settings round-trip normally, including intentional clears.
+    """
+    secrets = configparser.ConfigParser()
+    current = read_secrets()
+
+    # Start from the existing on-disk config.
+    for section in current.sections():
+        secrets.add_section(section)
+        for key, value in current[section].items():
+            secrets[section][key] = value
+
+    # Layer submitted values on top.
+    for section, fields in (config_data or {}).items():
+        if not isinstance(fields, dict):
+            continue
+        if not secrets.has_section(section):
             secrets.add_section(section)
-        for key in config_data[section]:
-            secrets[section][key] = config_data[section][key]
-    
+        for key, val in fields.items():
+            val = "" if val is None else str(val)
+            if is_secret_key(key) and val == "":
+                continue  # blank secret field = keep existing value
+            secrets[section][key] = val
+
     with open('secrets.txt', 'w') as f:
         secrets.write(f)
 
@@ -201,9 +245,9 @@ def index():
     # Handle Spotify OAuth callback if code is present
     if request.args.get('code'):
         return spotify_callback()
-    
-    secrets = read_secrets()
-    return render_template('index.html', config=secrets)
+
+    config, secret_flags = masked_secrets()
+    return render_template('index.html', config=config, secret_flags=secret_flags)
 
 @app.route('/update_config', methods=['POST'])
 def update_config():
@@ -222,6 +266,7 @@ def run_dj():
     output_queues[task_id] = queue
 
     def run():
+        process = None
         try:
             secrets = read_secrets()
             args = [sys.executable, '-u', os.path.join(os.path.dirname(__file__), 'naviDJ.py')]
@@ -231,12 +276,25 @@ def run_dj():
                 args += ['--prompt', str(data.get('prompt'))]
             if data.get('min_songs'):
                 args += ['--min_songs', str(data.get('min_songs'))]
-            
+            # Per-run overrides of naviDJ's own --llm_mode/--llm_model args
+            # (falls back to secrets.txt when not provided).
+            if data.get('llm_mode'):
+                args += ['--llm_mode', str(data.get('llm_mode'))]
+            if data.get('llm_model'):
+                args += ['--llm_model', str(data.get('llm_model'))]
+
             # Use chunk_size from config
             chunk_size = secrets.get('llm', 'chunk_size', fallback='500')
             args += ['--chunk_size', str(chunk_size)]
-            
-            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+            try:
+                process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            except Exception as e:
+                queue.put(f"ERROR: Failed to start naviDJ: {e}")
+                return
+
+            dj_processes[task_id] = process
+
             if process.stdout:
                 while True:
                     output = process.stdout.readline()
@@ -244,11 +302,43 @@ def run_dj():
                         break
                     if output:
                         queue.put(output.strip())
+
+            rc = process.poll()
+            if rc not in (0, None):
+                queue.put(f"ERROR: naviDJ exited with code {rc}")
+        except Exception as e:
+            queue.put(f"ERROR: {e}")
         finally:
+            dj_processes.pop(task_id, None)
             queue.put(None)  # Signal completion
 
     Thread(target=run).start()
     return jsonify({"task_id": task_id})
+
+
+@app.route('/cancel_dj/<task_id>', methods=['POST'])
+def cancel_dj(task_id):
+    """Terminate a running naviDJ subprocess started by /run_dj."""
+    process = dj_processes.get(task_id)
+    if not process:
+        return jsonify({"status": "not_found"}), 404
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    q = output_queues.get(task_id)
+    if q:
+        q.put("ERROR: Run cancelled by user.")
+    return jsonify({"status": "cancelled"})
 
 @app.route('/run_library', methods=['POST'])
 def run_library():
@@ -280,7 +370,7 @@ def run_library():
                     if output:
                         queue.put(output.strip())
         except Exception as e:
-            queue.put(f"Error: {str(e)}")
+            queue.put(f"ERROR: {str(e)}")
         finally:
             queue.put(None)  # Signal completion
 
@@ -487,15 +577,17 @@ def spotify_playlists():
 
 @app.route('/get_config')
 def get_config():
-    """Get current configuration for the frontend."""
-    secrets = read_secrets()
-    config = {}
-    
-    # Convert ConfigParser to dict
-    for section in secrets.sections():
-        config[section] = dict(secrets[section])
-    
-    return jsonify(config)
+    """
+    Get current configuration for the frontend. Secret values (API keys,
+    passwords, client secrets) are never included - only a boolean flag per
+    field indicating whether one is currently set. See masked_secrets().
+    """
+    config, secret_flags = masked_secrets()
+    result = {}
+    for section in config.sections():
+        result[section] = dict(config[section])
+    result["_secrets_set"] = secret_flags
+    return jsonify(result)
 
 @app.route('/favicon.ico')
 def favicon():
@@ -506,4 +598,9 @@ def dj_icon():
     return send_from_directory(os.path.join(app.root_path, ''), 'DJ.png', mimetype='image/png')
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Werkzeug's debug mode enables the interactive debugger, which is a
+    # remote-code-execution risk if this port is ever reachable beyond
+    # localhost. Default to off; opt in explicitly via FLASK_DEBUG=1 for
+    # local development.
+    debug_mode = os.environ.get('FLASK_DEBUG', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    app.run(debug=debug_mode)

@@ -199,16 +199,321 @@ document.getElementById('thinkingToggle')?.addEventListener('change', async func
 });
 
 
+// --------------------------------------------------
+// naviDJ tab: prompt history, structured progress, tracklist, cancel,
+// per-run model override.
+// --------------------------------------------------
+
+const DJ_PROMPT_HISTORY_KEY = 'naviDJ_promptHistory';
+const DJ_PROMPT_HISTORY_MAX = 8;
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str == null ? '' : String(str);
+    return div.innerHTML;
+}
+
+function loadPromptHistory() {
+    try {
+        const raw = localStorage.getItem(DJ_PROMPT_HISTORY_KEY);
+        return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function savePromptToHistory(prompt) {
+    if (!prompt || !prompt.trim()) return;
+    const trimmed = prompt.trim();
+    let history = loadPromptHistory().filter(p => p !== trimmed);
+    history.unshift(trimmed);
+    history = history.slice(0, DJ_PROMPT_HISTORY_MAX);
+    try {
+        localStorage.setItem(DJ_PROMPT_HISTORY_KEY, JSON.stringify(history));
+    } catch (e) {
+        // localStorage unavailable (private mode, quota, etc.) - not fatal
+    }
+    renderPromptHistory();
+}
+
+function renderPromptHistory() {
+    const container = document.getElementById('djPromptHistory');
+    if (!container) return;
+    const history = loadPromptHistory();
+    if (history.length === 0) {
+        container.innerHTML = '';
+        container.classList.add('d-none');
+        return;
+    }
+    container.classList.remove('d-none');
+    container.innerHTML = '<span class="prompt-history-label">recent:</span> ' +
+        history.map((p, i) => `<button type="button" class="prompt-chip" data-idx="${i}">${escapeHtml(p.length > 40 ? p.slice(0, 40) + '…' : p)}</button>`).join(' ');
+    container.querySelectorAll('.prompt-chip').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const idx = parseInt(btn.getAttribute('data-idx'), 10);
+            const h = loadPromptHistory();
+            const promptInput = document.getElementById('djPromptInput');
+            if (h[idx] !== undefined && promptInput) {
+                promptInput.value = h[idx];
+                promptInput.focus();
+            }
+        });
+    });
+}
+
+// Ordered stages naviDJ.py emits via "STAGE: <name>" marker lines.
+const DJ_STAGES = [
+    'Fetching Library',
+    'Gathering Metadata',
+    'Semantic Pre-filtering',
+    'Context Analysis',
+    'Selecting Focus Metadata',
+    'Filtering Candidates',
+    'Generating Playlist',
+    'Finalizing Playlist',
+    'Uploading to Server',
+    'Complete'
+];
+
+// Recognizable naviDJ.py stat lines, pulled out of the raw log into a clean
+// summary panel. First match wins per line.
+const DJ_STAT_PATTERNS = [
+    { re: /^Using LLM backend: (\S+) \(model: (.+)\)$/, label: m => `Model: ${m[1]} / ${m[2]}` },
+    { re: /^Library fetch complete: (\d+) songs/, label: m => `Library: ${m[1]} songs` },
+    { re: /^Gathered metadata: (\d+) artists, (\d+) genres, (\d+) albums/, label: m => `Metadata: ${m[1]} artists, ${m[2]} genres, ${m[3]} albums` },
+    { re: /^Implied era detected: (.+)$/, label: m => `Era bonus: ${m[1]}` },
+    { re: /^Explicit artists identified: (.+)$/, label: m => `Explicit artists: ${m[1]}` },
+    { re: /^Final candidate pool: (\d+) songs/, label: m => `Candidate pool: ${m[1]} songs` },
+    { re: /^Variant dedup: (.+)$/, label: m => `Dedup: ${m[1]}` },
+    { re: /^Final playlist generated: (\d+) tracks/, label: m => `Generated: ${m[1]} tracks` },
+    { re: /^Artist cap \([^)]*\) enforced: (.+)$/, label: m => `Artist cap: ${m[1]}` },
+    { re: /^Playlist '(.+)' successfully updated on server/, label: m => `Uploaded playlist: ${m[1]}` },
+];
+
+function setupDjForm() {
+    const form = document.getElementById('djForm');
+    if (!form) return;
+
+    const submitBtn = document.getElementById('djSubmitBtn');
+    const cancelBtn = document.getElementById('djCancelBtn');
+    const promptInput = document.getElementById('djPromptInput');
+    const progressPanel = document.getElementById('djProgressPanel');
+    const stageListEl = document.getElementById('djStageList');
+    const statsEl = document.getElementById('djStats');
+    const resultPanel = document.getElementById('djResultPanel');
+    const resultHeading = document.getElementById('djResultHeading');
+    const trackListEl = document.getElementById('djTrackList');
+    const rawLogToggle = document.getElementById('djRawLogToggle');
+    const outputDiv = document.getElementById('djOutput');
+
+    renderPromptHistory();
+
+    if (rawLogToggle && outputDiv) {
+        rawLogToggle.addEventListener('click', (e) => {
+            e.preventDefault();
+            const hidden = outputDiv.classList.toggle('d-none');
+            rawLogToggle.innerHTML = hidden ? 'show raw log &#9656;' : 'hide raw log &#9662;';
+        });
+    }
+
+    let currentTaskId = null;
+    let statLines = [];
+    let stageEls = {}; // stage name -> <li> element, rebuilt each run
+
+    function resetRunUi() {
+        statLines = [];
+        stageEls = {};
+        if (stageListEl) {
+            stageListEl.innerHTML = '';
+            DJ_STAGES.forEach(s => {
+                const li = document.createElement('li');
+                li.className = 'stage-item';
+                const dot = document.createElement('span');
+                dot.className = 'stage-dot';
+                li.appendChild(dot);
+                li.appendChild(document.createTextNode(s));
+                stageListEl.appendChild(li);
+                stageEls[s] = li;
+            });
+        }
+        if (statsEl) statsEl.innerHTML = '';
+        if (progressPanel) progressPanel.classList.remove('d-none');
+        if (resultPanel) resultPanel.classList.add('d-none');
+        if (trackListEl) trackListEl.innerHTML = '';
+        if (outputDiv) {
+            outputDiv.innerHTML = '';
+            outputDiv.classList.add('d-none');
+        }
+        if (rawLogToggle) rawLogToggle.innerHTML = 'show raw log &#9656;';
+    }
+
+    function markStage(stageName) {
+        const idx = DJ_STAGES.indexOf(stageName);
+        if (idx === -1) return;
+        DJ_STAGES.forEach((s, i) => {
+            const li = stageEls[s];
+            if (!li) return;
+            li.classList.remove('stage-active', 'stage-done');
+            if (i < idx || stageName === 'Complete') {
+                li.classList.add('stage-done');
+            } else if (i === idx) {
+                li.classList.add('stage-active');
+            }
+        });
+    }
+
+    function addStat(html) {
+        if (!statsEl) return;
+        statLines.push(html);
+        statsEl.innerHTML = statLines.map(t => `<div>${t}</div>`).join('');
+    }
+
+    function renderTracklist(payload) {
+        if (!resultPanel || !trackListEl) return;
+        const tracks = (payload && payload.tracks) || [];
+        const name = (payload && payload.playlist_name) || 'playlist';
+        resultPanel.classList.remove('d-none');
+        if (resultHeading) resultHeading.textContent = `"${name}" — ${tracks.length} tracks`;
+        trackListEl.innerHTML = tracks.map(t => {
+            let line = `${escapeHtml(t.title || 'Unknown title')} — ${escapeHtml(t.artist || 'Unknown artist')}`;
+            if (t.album) line += ` — ${escapeHtml(t.album)}`;
+            if (t.year) line += ` (${escapeHtml(t.year)})`;
+            return `<li>${line}</li>`;
+        }).join('');
+    }
+
+    function setRunning(isRunning) {
+        if (submitBtn) {
+            submitBtn.disabled = isRunning;
+            submitBtn.innerHTML = isRunning
+                ? '<span class="spinner-border spinner-border-sm me-2"></span>generating...'
+                : '<b>generate your mix</b>';
+        }
+        if (cancelBtn) {
+            cancelBtn.classList.toggle('d-none', !isRunning);
+            cancelBtn.disabled = false;
+        }
+    }
+
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', async () => {
+            if (!currentTaskId) return;
+            cancelBtn.disabled = true;
+            try {
+                await fetch(`/cancel_dj/${currentTaskId}`, { method: 'POST' });
+            } catch (e) {
+                // Stream's onerror handler will still clean up the UI even
+                // if this request itself fails.
+            }
+        });
+    }
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const formData = new FormData(form);
+        const data = {};
+        for (let [key, value] of formData.entries()) {
+            if (value === '') continue; // don't send blank optional overrides
+            data[key] = value;
+        }
+
+        savePromptToHistory(promptInput ? promptInput.value : '');
+        resetRunUi();
+        setRunning(true);
+
+        try {
+            const response = await fetch('/run_dj', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            const result = await response.json();
+
+            if (!result.task_id) {
+                addStat(`<span class="log-error">Error: ${escapeHtml(result.error || 'Failed to start run.')}</span>`);
+                setRunning(false);
+                return;
+            }
+
+            currentTaskId = result.task_id;
+            const eventSource = new EventSource(`/stream/${result.task_id}`);
+
+            eventSource.onmessage = (event) => {
+                const line = event.data;
+
+                // PLAYLIST_JSON: hidden from the raw log, rendered as a tracklist.
+                const plMatch = line.match(/^PLAYLIST_JSON:\s*(.+)$/);
+                if (plMatch) {
+                    try {
+                        renderTracklist(JSON.parse(plMatch[1]));
+                    } catch (err) {
+                        console.error('Failed to parse PLAYLIST_JSON', err);
+                    }
+                    return; // don't echo to raw log
+                }
+
+                // STAGE: marker lines drive the progress list.
+                const stageMatch = line.match(/^STAGE:\s*(.+)$/);
+                if (stageMatch) {
+                    markStage(stageMatch[1].trim());
+                }
+
+                // Known stat lines get pulled into the summary panel.
+                for (const pattern of DJ_STAT_PATTERNS) {
+                    const m = line.match(pattern.re);
+                    if (m) {
+                        addStat(pattern.label(m));
+                        break;
+                    }
+                }
+
+                const isError = /^error:/i.test(line.trim());
+                if (isError) addStat(`<span class="log-error">${escapeHtml(line)}</span>`);
+
+                if (outputDiv) {
+                    const rendered = isError ? `<span class="log-error">${escapeHtml(line)}</span>` : escapeHtml(line);
+                    const isProgressBar = (line.includes('|') && /\d+%\|/.test(line)) || line.includes('song/s');
+                    if (isProgressBar) {
+                        const lines = outputDiv.innerHTML.split('<br>');
+                        if (lines.length > 1) {
+                            lines[lines.length - 1] = rendered;
+                            outputDiv.innerHTML = lines.join('<br>');
+                        } else {
+                            outputDiv.innerHTML = rendered + '<br>';
+                        }
+                    } else {
+                        outputDiv.innerHTML += rendered + '<br>';
+                    }
+                    outputDiv.scrollTop = outputDiv.scrollHeight;
+                }
+            };
+
+            eventSource.onerror = () => {
+                eventSource.close();
+                currentTaskId = null;
+                setRunning(false);
+            };
+        } catch (error) {
+            addStat(`<span class="log-error">Error: ${escapeHtml(String(error))}</span>`);
+            setRunning(false);
+        }
+    });
+}
+
 // Helper function to handle script execution and output streaming
+// (used for the library porter tab; the DJ tab has its own richer handler,
+// see setupDjForm() below)
 function handleScriptExecution(formId, outputId, endpoint) {
     document.getElementById(formId).addEventListener('submit', async (e) => {
         e.preventDefault();
         const form = e.target;
+        const submitBtn = form.querySelector('button[type="submit"]');
         const outputDiv = document.getElementById(outputId);
         outputDiv.innerHTML = '';
         // Show output only when script is run
         outputDiv.classList.remove('d-none');
-        
+
         // Check Spotify authentication for library porter
         if (formId === 'libraryForm') {
             if (!spotifyAuthStatus || !spotifyAuthStatus.authenticated) {
@@ -218,7 +523,7 @@ function handleScriptExecution(formId, outputId, endpoint) {
                 }
             }
         }
-        
+
         const formData = new FormData(form);
         const data = {};
         for (let [key, value] of formData.entries()) {
@@ -250,7 +555,20 @@ function handleScriptExecution(formId, outputId, endpoint) {
                 }
             }
         }
-        
+
+        // Double-submit guard
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.dataset.originalText = submitBtn.dataset.originalText || submitBtn.innerHTML;
+            submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>running...';
+        }
+        const finishRun = () => {
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                if (submitBtn.dataset.originalText) submitBtn.innerHTML = submitBtn.dataset.originalText;
+            }
+        };
+
         try {
             const response = await fetch(endpoint, {
                 method: 'POST',
@@ -258,48 +576,58 @@ function handleScriptExecution(formId, outputId, endpoint) {
                 body: JSON.stringify(data)
             });
             const result = await response.json();
-            
+
             if (result.task_id) {
                 const eventSource = new EventSource(`/stream/${result.task_id}`);
-                
+
                 eventSource.onmessage = (event) => {
                     let line = event.data;
 
                     // Show output if hidden (in case of async race)
                     outputDiv.classList.remove('d-none');
 
+                    const isError = /^error:/i.test(line.trim());
                     // Detect progress bar lines (tqdm or similar)
                     const isProgressBar = (line.includes('|') && /\d+%\|/.test(line)) || line.includes('song/s') || line.includes('Building playlist:');
+                    const rendered = isError ? `<span class="log-error">${line}</span>` : line;
 
                     if (isProgressBar) {
                         // Overwrite the last line
                         const lines = outputDiv.innerHTML.split('<br>');
                         if (lines.length > 1) {
-                            lines[lines.length - 1] = line;
+                            lines[lines.length - 1] = rendered;
                             outputDiv.innerHTML = lines.join('<br>');
                         } else {
-                            outputDiv.innerHTML = line + '<br>';
+                            outputDiv.innerHTML = rendered + '<br>';
                         }
                     } else {
                         // Normal output: append as new line
-                        outputDiv.innerHTML += line + '<br>';
+                        outputDiv.innerHTML += rendered + '<br>';
                     }
                     outputDiv.scrollTop = outputDiv.scrollHeight;
                 };
-                
+
                 eventSource.onerror = () => {
                     eventSource.close();
+                    finishRun();
                 };
+            } else {
+                finishRun();
+                if (result.error) {
+                    outputDiv.classList.remove('d-none');
+                    outputDiv.innerHTML += `<span class="log-error">Error: ${result.error}</span><br>`;
+                }
             }
         } catch (error) {
             outputDiv.classList.remove('d-none');
-            outputDiv.innerHTML += 'Error: ' + error + '<br>';
+            outputDiv.innerHTML += `<span class="log-error">Error: ${error}</span><br>`;
+            finishRun();
         }
     });
 }
 
 // Set up form handlers
-handleScriptExecution('djForm', 'djOutput', '/run_dj');
+setupDjForm();
 handleScriptExecution('libraryForm', 'libraryOutput', '/run_library');
 
 // Make Enter in the DJ prompt textarea submit the form
