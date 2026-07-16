@@ -398,3 +398,25 @@ h1, h5, .card-header, .nav-link.active {
     border-color: #43e97b;
     color: #43e97b;
 }
+
+/* history tab */
+.history-entry {
+    margin-bottom: 16px;
+}
+.history-meta {
+    color: #8888aa;
+    font-size: 0.85em;
+}
+.history-log {
+    height: auto;
+    max-height: 300px;
+    margin-top: 8px;
+}
+.history-entry summary {
+    color: #a259f7;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+.history-entry summary:hover {
+    color: #43e97b;
+}

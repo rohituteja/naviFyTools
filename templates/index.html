@@ -176,6 +176,9 @@
             <li class="nav-item">
                 <a class="nav-link" data-bs-toggle="tab" href="#libraryTab"><b>library porter</b></a>
             </li>
+            <li class="nav-item">
+                <a class="nav-link" data-bs-toggle="tab" href="#historyTab"><b>history</b></a>
+            </li>
         </ul>
 
         <div class="tab-content">
@@ -190,26 +193,13 @@
                             <span class="mb-0"><b>dj options</b></span>
                         </div>
                         <div class="row mb-3 dj-fields-row collapse" id="djOptionsCollapse">
-                            <div class="col-md-3 mb-2 mb-md-0">
+                            <div class="col-md-6 mb-2 mb-md-0">
                                 <label class="form-label">playlist name</label>
                                 <input type="text" class="form-control" name="playlist_name" value="naviDJ">
                             </div>
-                            <div class="col-md-3 mb-2 mb-md-0">
+                            <div class="col-md-6 mb-2 mb-md-0">
                                 <label class="form-label">min. songs</label>
                                 <input type="number" class="form-control" name="min_songs" value="35">
-                            </div>
-                            <div class="col-md-3 mb-2 mb-md-0">
-                                <label class="form-label">llm mode override</label>
-                                <select class="form-control" name="llm_mode">
-                                    <option value="">(use configured default)</option>
-                                    <option value="openai">OpenAI</option>
-                                    <option value="ollama">Ollama</option>
-                                </select>
-                            </div>
-                            <div class="col-md-3 mb-2 mb-md-0">
-                                <label class="form-label">llm model override</label>
-                                <input type="text" class="form-control" name="llm_model"
-                                    placeholder="leave blank for default">
                             </div>
                         </div>
                     </div>
@@ -338,6 +328,11 @@
                     <button type="submit" class="btn btn-primary"><b>run library porter</b></button>
                 </form>
                 <div class="output-container d-none" id="libraryOutput"></div>
+            </div>
+
+            <!-- History Tab -->
+            <div id="historyTab" class="tab-pane fade">
+                <div id="historyList"></div>
             </div>
         </div>
     </div>

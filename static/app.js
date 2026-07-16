@@ -862,6 +862,115 @@ document.querySelector('a[href="#libraryTab"]')?.addEventListener('click', funct
     }, 100);
 });
 
+// --------------------------------------------------
+// history tab: last 10 naviDJ runs from the server, each expandable with
+// tracklist, decision log, and a feedback box.
+// --------------------------------------------------
+
+function renderHistoryTracklist(tracks) {
+    return (tracks || []).map(t => {
+        let line = `${escapeHtml(t.title || 'Unknown title')} — ${escapeHtml(t.artist || 'Unknown artist')}`;
+        if (t.album) line += ` — ${escapeHtml(t.album)}`;
+        if (t.year) line += ` (${escapeHtml(t.year)})`;
+        return `<li>${line}</li>`;
+    }).join('');
+}
+
+function renderHistoryEntry(entry) {
+    const panel = document.createElement('div');
+    panel.className = 'dj-panel history-entry';
+
+    const failed = entry.success === false
+        ? ' <span class="log-error">failed</span>' : '';
+    const prompt = entry.prompt || '';
+    const promptHtml = prompt.length <= 140
+        ? `<div>${escapeHtml(prompt)}</div>`
+        : `<details><summary>${escapeHtml(prompt.slice(0, 140) + '…')}</summary><div>${escapeHtml(prompt)}</div></details>`;
+    const logHtml = (entry.log || []).map(escapeHtml).join('<br>');
+
+    panel.innerHTML = `
+        <h6>${escapeHtml(entry.playlist_name || 'playlist')} — ${escapeHtml(entry.track_count)} tracks${failed}</h6>
+        <div class="history-meta">${escapeHtml(new Date(entry.timestamp).toLocaleString())} · ${escapeHtml(entry.llm_mode || '')} / ${escapeHtml(entry.llm_model || '')}</div>
+        <div><span class="form-label">prompt</span>${promptHtml}</div>
+        <details><summary>tracklist (${escapeHtml(entry.track_count)})</summary>
+            <ol class="track-list">${renderHistoryTracklist(entry.tracks)}</ol>
+        </details>
+        <details><summary>decision log</summary>
+            <div class="output-container history-log">${logHtml}</div>
+        </details>
+        <div class="mt-2">
+            <span class="form-label">your feedback</span>
+            <textarea class="form-control history-feedback" rows="3"></textarea>
+            <div class="mt-2 d-flex gap-2 align-items-center">
+                <button type="button" class="btn btn-primary btn-sm history-feedback-save">save feedback</button>
+                <span class="history-feedback-status"></span>
+            </div>
+        </div>`;
+
+    const textarea = panel.querySelector('.history-feedback');
+    const saveBtn = panel.querySelector('.history-feedback-save');
+    const status = panel.querySelector('.history-feedback-status');
+    textarea.value = entry.feedback ? entry.feedback.text : '';
+    if (entry.feedback) {
+        status.textContent = `saved ${new Date(entry.feedback.at).toLocaleString()}`;
+    }
+
+    saveBtn.addEventListener('click', async () => {
+        const text = textarea.value.trim();
+        status.classList.remove('log-error');
+        if (!text) {
+            status.classList.add('log-error');
+            status.textContent = 'feedback cannot be empty';
+            return;
+        }
+        saveBtn.disabled = true;
+        status.textContent = 'saving...';
+        try {
+            const resp = await fetch(`/playlist_history/${encodeURIComponent(entry.id)}/feedback`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text })
+            });
+            const result = await resp.json();
+            if (resp.ok) {
+                status.textContent = 'saved just now';
+            } else {
+                status.classList.add('log-error');
+                status.textContent = result.error || 'failed to save';
+            }
+        } catch (err) {
+            status.classList.add('log-error');
+            status.textContent = String(err);
+        } finally {
+            saveBtn.disabled = false;
+        }
+    });
+
+    return panel;
+}
+
+async function loadPlaylistHistory() {
+    const container = document.getElementById('historyList');
+    if (!container) return;
+    try {
+        const resp = await fetch('/playlist_history');
+        const entries = await resp.json();
+        container.innerHTML = '';
+        if (!Array.isArray(entries) || entries.length === 0) {
+            container.innerHTML = '<div class="history-meta">no playlist runs yet — generate a mix and it will show up here.</div>';
+            return;
+        }
+        entries.forEach(entry => container.appendChild(renderHistoryEntry(entry)));
+    } catch (err) {
+        container.innerHTML = `<div class="log-error">${escapeHtml('error loading history: ' + err)}</div>`;
+    }
+}
+
+// Refetch on every activation so newly completed runs appear.
+document.querySelector('a[href="#historyTab"]')?.addEventListener('click', function() {
+    setTimeout(loadPlaylistHistory, 100);
+});
+
 // Check auth status on page load if we're on the library tab
 document.addEventListener('DOMContentLoaded', function() {
     // Initialize LLM configuration on page load

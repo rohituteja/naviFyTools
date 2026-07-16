@@ -6,6 +6,7 @@ embeddings_cache.pkl
 pipenv/
 *.pkl
 .mb_cache.json
+playlist_history.json
 .DS_Store
 .env
 venv/

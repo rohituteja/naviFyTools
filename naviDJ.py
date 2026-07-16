@@ -12,7 +12,7 @@ Usage:
 Arguments:
     --playlist_name   Name of the playlist to create or update (default: naviDJ)
     --prompt          Vibe prompt for the playlist (required if not interactive)
-    --min_songs       Minimum number of songs in the playlist (default: 35)
+    --min_songs       Target/exact number of songs in the playlist (default: 35)
     --llm_mode        LLM backend to use: openai or ollama (default: openai)
 
 If arguments are omitted, the script will prompt for them interactively.
@@ -25,6 +25,7 @@ import xml.etree.ElementTree as ET
 import json
 import random
 import re
+import difflib
 import time
 
 from tqdm import tqdm
@@ -750,9 +751,9 @@ def filter_library_by_metadata(
 
         # New Additive Weighting System:
 
-        # 1. Explicit Matches (+3.0 each)
+        # 1. Explicit Matches (artist +4.5, genre/album +3.0 each)
         if any(a in exp_a for a in song_artists):
-            score += 3.0
+            score += 4.5
         if any(g in exp_g for g in song_genres):
             score += 3.0
         if song_album in exp_al:
@@ -813,6 +814,22 @@ def filter_library_by_metadata(
         print(f"Stratified pool: {len(tier1)} high + {len(tier2)} medium + {len(tier3)} discovery = {len(pool)} songs.")
 
     return pool
+
+
+def _trim_to_relevance(
+    playlist: list[dict], filtered_songs: list[dict], min_songs: int
+) -> list[dict]:
+    """Keep the highest-relevance *min_songs* picks (no-op if already <= that).
+
+    min_songs means exactly N, so overshoot is trimmed. Picks carry only
+    {id, title}; relevance scores live on *filtered_songs*, so look them up by
+    id (missing score -> 0, never crash).
+    """
+    if len(playlist) <= min_songs:
+        return playlist
+    score_by_id = {s["id"]: s.get("_relevance_score", 0) for s in filtered_songs}
+    playlist.sort(key=lambda item: score_by_id.get(item["id"], 0), reverse=True)
+    return playlist[:min_songs]
 
 
 def generate_playlist_single_call(
@@ -928,6 +945,9 @@ def generate_playlist_single_call(
             playlist, filtered_songs, min_songs, explicit_artists=explicit_artists
         )
 
+    # Trim if the LLM overshot: min_songs means exactly N, keep highest-relevance.
+    playlist = _trim_to_relevance(playlist, filtered_songs, min_songs)
+
     return playlist
 
 
@@ -1017,7 +1037,9 @@ def generate_playlist_chunked(
             unique_selections, filtered_songs, min_songs, explicit_artists=explicit_artists
         )
 
-    return unique_selections[:min_songs]
+    # Trim to exactly min_songs by relevance (not positional), matching the
+    # single-call path. Only bites when a small --chunk_size overshoots.
+    return _trim_to_relevance(unique_selections, filtered_songs, min_songs)
 
 
 # --------------------------------------------------
@@ -1246,6 +1268,22 @@ def select_context_playlist_songs(
     id_map = {s["id"]: s for s in all_songs}
     songs = [id_map[s["id"]] for s in pl["songs"] if s["id"] in id_map]
     return songs
+
+
+def _context_overlaps_explicit_artists(
+    context_songs: list[dict], explicit_artists: list[str]
+) -> bool:
+    """True if any explicitly requested artist appears among the context songs.
+
+    Splits multi-artist strings the same way scoring does (`_split_artist_string`)
+    so a "A & B" credit counts as both A and B, matching `set(explicit_artists)`
+    membership exactly.
+    """
+    wanted = set(explicit_artists)
+    for s in context_songs:
+        if any(a in wanted for a in _split_artist_string(s.get("artist", ""))):
+            return True
+    return False
 
 
 # --------------------------------------------------
@@ -1507,6 +1545,25 @@ def extract_prompt_entities(
     # Artists: check both exact and partial matches
     check_matches(all_artists, "artists")
 
+    # Fuzzy fallback: only if the exact/partial pass found no artist at all.
+    # Catches typo'd prompts ("micheal jackson" -> "Michael Jackson") so the
+    # downstream artist-preference system still engages instead of silently
+    # doing nothing. Accept an artist only if EVERY significant word has a
+    # close prompt match (mirrors the all-words partial-match rule above).
+    # ponytail: multi-word artists only, to avoid single-word fuzzy false
+    # positives ("prince"); add a per-artist alias table if this is too coarse.
+    if not entities["artists"]:
+        for item in all_artists:
+            item_words = set(re.findall(r"\b\w+\b", item.lower())) - STOPWORDS
+            if len(item_words) < 2:
+                continue
+            if all(
+                difflib.get_close_matches(w, prompt_words, n=1, cutoff=0.8)
+                for w in item_words
+            ):
+                entities["artists"].append(item)
+                print(f"Fuzzy-matched artist: '{item}' (approximate prompt match)")
+
     # Albums: check both exact and partial matches
     check_matches(all_albums, "albums")
 
@@ -1691,10 +1748,37 @@ def _main_impl(args):
     # ========== CONTEXT ANALYSIS ==========
     print("STAGE: Context Analysis")
     start_t = time.time()
+
+    # Extract explicit mentions from prompt FIRST, so context selection is aware
+    # of any explicit-artist request (used to discard an off-artist context
+    # playlist just below). Only depends on prompt + catalog lists.
+    prompt_entities = extract_prompt_entities(
+        prompt, all_artists, all_genres, all_albums
+    )
+    explicit_artists = prompt_entities["artists"]
+    explicit_genres = prompt_entities["genres"]
+    explicit_albums = prompt_entities["albums"]
+    era_range = detect_prompt_era(prompt)
+
     existing_playlists = fetch_all_playlists(exclude_name=playlist_name)
     context_songs = select_context_playlist_songs(
         prompt, existing_playlists, all_songs, embedding_manager=embedding_manager
     )
+
+    # If the user named explicit artist(s) but the chosen context playlist has
+    # none of them, discard it. Its context bonuses (+4.0 in-playlist, +2.0
+    # metadata) can otherwise outrank the +3.0 explicit-artist bonus and pull in
+    # off-artist tracks (e.g. "michael jackson mix" picking an indie-rock list).
+    if (
+        explicit_artists
+        and context_songs
+        and not _context_overlaps_explicit_artists(context_songs, explicit_artists)
+    ):
+        print(
+            f"Discarding context playlist: no songs by requested artist(s) "
+            f"{', '.join(explicit_artists)}."
+        )
+        context_songs = []
 
     # Extract metadata from context (Top N most frequent)
     context_artists = []
@@ -1716,14 +1800,6 @@ def _main_impl(args):
         context_artists = [a for a, _ in art_counts.most_common(10)]
         context_genres = [g for g, _ in gen_counts.most_common(5)]
         context_albums = [al for al, _ in alb_counts.most_common(5)]
-    # Extract explicit mentions from prompt
-    prompt_entities = extract_prompt_entities(
-        prompt, all_artists, all_genres, all_albums
-    )
-    explicit_artists = prompt_entities["artists"]
-    explicit_genres = prompt_entities["genres"]
-    explicit_albums = prompt_entities["albums"]
-    era_range = detect_prompt_era(prompt)
 
     print(f"Context analysis complete ({time.time() - start_t:.1f}s)")
 
@@ -1923,7 +1999,7 @@ if __name__ == "__main__":
         "--min_songs",
         type=int,
         default=35,
-        help="Minimum number of songs in the playlist.",
+        help="Target/exact number of songs in the playlist.",
     )
     parser.add_argument(
         "--chunk_size",

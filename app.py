@@ -2,7 +2,8 @@ from flask import Flask, render_template, request, jsonify, Response, send_from_
 import configparser
 import os
 import sys
-from threading import Thread
+from threading import Thread, Lock
+from datetime import datetime, timezone
 from queue import Queue
 import time
 from functools import partial
@@ -27,6 +28,28 @@ output_queues = {}
 # Popen handles for currently-running naviDJ subprocesses, keyed by task_id,
 # so a run can be cancelled from the browser (see /cancel_dj/<task_id>).
 dj_processes = {}
+
+# Last N naviDJ runs (prompt, decision log, tracks, feedback), persisted so
+# runs can be reviewed/annotated from the History tab.
+HISTORY_FILE = os.path.join(os.path.dirname(__file__), 'playlist_history.json')
+HISTORY_MAX = 10
+# ponytail: in-process lock only; enough for the single-process Flask dev
+# server, add file locking if this ever runs multi-process.
+history_lock = Lock()
+
+
+def read_history():
+    try:
+        with open(HISTORY_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def write_history(history):
+    with open(HISTORY_FILE, 'w') as f:
+        json.dump(history, f, indent=2)
+
 
 # Config keys (case-insensitive, matched by key name regardless of section)
 # that hold secret values. These are never sent to the browser and are only
@@ -266,6 +289,7 @@ def run_dj():
     output_queues[task_id] = queue
 
     def run():
+        captured = []
         process = None
         try:
             secrets = read_secrets()
@@ -301,11 +325,41 @@ def run_dj():
                     if output == '' and process.poll() is not None:
                         break
                     if output:
-                        queue.put(output.strip())
+                        line = output.strip()
+                        queue.put(line)
+                        captured.append(line)
 
             rc = process.poll()
             if rc not in (0, None):
                 queue.put(f"ERROR: naviDJ exited with code {rc}")
+
+            playlist = None
+            for line in reversed(captured):
+                if line.startswith('PLAYLIST_JSON:'):
+                    try:
+                        playlist = json.loads(line[len('PLAYLIST_JSON:'):])
+                    except ValueError:
+                        pass
+                    break
+            tracks = (playlist or {}).get('tracks') or []
+            entry = {
+                'id': task_id,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'prompt': str(data.get('prompt', '')),
+                'playlist_name': (playlist or {}).get('playlist_name') or str(data.get('playlist_name', '')),
+                'llm_mode': str(data.get('llm_mode') or secrets.get('llm', 'mode', fallback='')),
+                'llm_model': str(data.get('llm_model') or secrets.get('llm', 'model', fallback='')),
+                'min_songs': str(data.get('min_songs', '')),
+                'track_count': len(tracks),
+                'tracks': tracks,
+                'log': captured,  # full decision process as emitted by naviDJ
+                'success': rc == 0 and playlist is not None,
+                'feedback': None,
+            }
+            with history_lock:
+                history = read_history()
+                history.append(entry)
+                write_history(history[-HISTORY_MAX:])
         except Exception as e:
             queue.put(f"ERROR: {e}")
         finally:
@@ -339,6 +393,29 @@ def cancel_dj(task_id):
     if q:
         q.put("ERROR: Run cancelled by user.")
     return jsonify({"status": "cancelled"})
+
+
+@app.route('/playlist_history')
+def playlist_history():
+    with history_lock:
+        history = read_history()
+    history.reverse()  # most recent first
+    return jsonify(history)
+
+
+@app.route('/playlist_history/<entry_id>/feedback', methods=['POST'])
+def playlist_history_feedback(entry_id):
+    text = ((request.get_json(silent=True) or {}).get('text') or '').strip()
+    if not text:
+        return jsonify({'error': 'Feedback text required'}), 400
+    with history_lock:
+        history = read_history()
+        for entry in history:
+            if entry.get('id') == entry_id:
+                entry['feedback'] = {'text': text, 'at': datetime.now(timezone.utc).isoformat()}
+                write_history(history)
+                return jsonify(entry)
+    return jsonify({'error': 'Entry not found'}), 404
 
 @app.route('/run_library', methods=['POST'])
 def run_library():
