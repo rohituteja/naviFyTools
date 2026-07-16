@@ -298,7 +298,7 @@ function setupDjForm() {
     const cancelBtn = document.getElementById('djCancelBtn');
     const promptInput = document.getElementById('djPromptInput');
     const progressPanel = document.getElementById('djProgressPanel');
-    const stageListEl = document.getElementById('djStageList');
+    const stageCurrentEl = document.getElementById('djStageCurrent');
     const statsEl = document.getElementById('djStats');
     const resultPanel = document.getElementById('djResultPanel');
     const resultHeading = document.getElementById('djResultHeading');
@@ -318,23 +318,14 @@ function setupDjForm() {
 
     let currentTaskId = null;
     let statLines = [];
-    let stageEls = {}; // stage name -> <li> element, rebuilt each run
+    let runStartTime = null;
 
     function resetRunUi() {
         statLines = [];
-        stageEls = {};
-        if (stageListEl) {
-            stageListEl.innerHTML = '';
-            DJ_STAGES.forEach(s => {
-                const li = document.createElement('li');
-                li.className = 'stage-item';
-                const dot = document.createElement('span');
-                dot.className = 'stage-dot';
-                li.appendChild(dot);
-                li.appendChild(document.createTextNode(s));
-                stageListEl.appendChild(li);
-                stageEls[s] = li;
-            });
+        runStartTime = Date.now();
+        if (stageCurrentEl) {
+            stageCurrentEl.className = 'stage-current';
+            stageCurrentEl.innerHTML = '<span class="stage-dot"></span>starting…';
         }
         if (statsEl) statsEl.innerHTML = '';
         if (progressPanel) progressPanel.classList.remove('d-none');
@@ -347,25 +338,25 @@ function setupDjForm() {
         if (rawLogToggle) rawLogToggle.innerHTML = 'show raw log &#9656;';
     }
 
+    // Single cycling status line instead of a static 10-item checklist -
+    // shows only the current stage, "step X/N" for progress context.
     function markStage(stageName) {
         const idx = DJ_STAGES.indexOf(stageName);
-        if (idx === -1) return;
-        DJ_STAGES.forEach((s, i) => {
-            const li = stageEls[s];
-            if (!li) return;
-            li.classList.remove('stage-active', 'stage-done');
-            if (i < idx || stageName === 'Complete') {
-                li.classList.add('stage-done');
-            } else if (i === idx) {
-                li.classList.add('stage-active');
-            }
-        });
+        if (idx === -1 || !stageCurrentEl) return;
+        if (stageName === 'Complete') {
+            const elapsed = runStartTime ? ((Date.now() - runStartTime) / 1000).toFixed(1) : null;
+            stageCurrentEl.className = 'stage-current stage-complete';
+            stageCurrentEl.innerHTML = `<span class="stage-dot"></span>complete${elapsed ? ` — ${elapsed}s` : ''}`;
+        } else {
+            stageCurrentEl.className = 'stage-current';
+            stageCurrentEl.innerHTML = `<span class="stage-dot"></span>${escapeHtml(stageName)} <span class="stage-step">(${idx + 1}/${DJ_STAGES.length})</span>`;
+        }
     }
 
     function addStat(html) {
         if (!statsEl) return;
         statLines.push(html);
-        statsEl.innerHTML = statLines.map(t => `<div>${t}</div>`).join('');
+        statsEl.innerHTML = statLines.map(t => `<span class="stat-chip">${t}</span>`).join('');
     }
 
     function renderTracklist(payload) {
