@@ -60,6 +60,7 @@ class EmbeddingManager:
             self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
             self.api_key = api_key
         
+        self._cached_dim = None
         self._load_cache()
     
     def _load_cache(self) -> None:
@@ -114,6 +115,13 @@ class EmbeddingManager:
                 "model_name": self.model_name,
                 "library_size": 0
             }
+        
+        # Remember dim of loaded cache so a silent model swap (same model name,
+        # different dim) invalidates it instead of poisoning new vectors.
+        for _v in self.cache.values():
+            if hasattr(_v, "shape"):
+                self._cached_dim = _v.shape[0]
+            break
     
     def _save_cache(self) -> None:
         """Save embeddings cache to disk with metadata."""
@@ -222,8 +230,14 @@ class EmbeddingManager:
                 logger.warning(f"API response missing 'embedding' or 'data' field: {data}")
                 return None
             
-            # Cache the embedding
+            # Cache the embedding (invalidate if dim changed = silent model swap)
+            if self._cached_dim is not None and self._cached_dim != embedding.shape[0]:
+                logger.warning(
+                    f"Embedding dim {embedding.shape[0]} != cached dim {self._cached_dim} - invalidating cache"
+                )
+                self.cache = {}
             self.cache[text] = embedding
+            self._cached_dim = embedding.shape[0]
             self._save_cache()
             
             return embedding
@@ -361,6 +375,17 @@ class EmbeddingManager:
             except Exception as e:
                 logger.warning(f"Batch embedding generation failed: {e}")
         
+        _new = next((r for r in results if r is not None), None)
+        if _new is not None and self._cached_dim is not None and self._cached_dim != _new.shape[0]:
+            logger.warning(
+                f"Batch embedding dim {_new.shape[0]} != cached dim {self._cached_dim} - invalidating stale cache"
+            )
+            self.cache = {}
+            for _t, _e in zip(texts, results):
+                if _e is not None:
+                    self.cache[_t] = _e
+        if _new is not None:
+            self._cached_dim = _new.shape[0]
         self._save_cache()
         return results
 
