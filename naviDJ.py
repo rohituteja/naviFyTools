@@ -757,7 +757,7 @@ def filter_library_by_metadata(
         if any(g in exp_g for g in song_genres):
             score += 3.0
         if song_album in exp_al:
-            score += 3.0
+            score += 4.5  # P0: explicit album must outrank context-in-playlist (+4.0)
 
         # 2. Context Playlist Matches
         # Explicitly in context playlist (+4.0)
@@ -809,6 +809,9 @@ def filter_library_by_metadata(
 
     pool = tier1 + tier2 + tier3
     random.shuffle(pool)
+    # P5: tier distribution is a first-class decision log (which songs the
+    # picker can even see, and in what order, depends on these tiers).
+    print(f"Tier distribution: tier1={len(tier1)} tier2={len(tier2)} tier3={len(tier3)} (pool={len(pool)})")
 
     if len(pool) < len(filtered):
         print(f"Stratified pool: {len(tier1)} high + {len(tier2)} medium + {len(tier3)} discovery = {len(pool)} songs.")
@@ -837,6 +840,9 @@ def generate_playlist_single_call(
     filtered_songs: list[dict],
     min_songs: int,
     explicit_artists: list[str] = None,
+    explicit_albums: list[str] = None,
+    explicit_genres: list[str] = None,
+    mode: str = "default",
 ) -> list[dict]:
     """
     Generate playlist with a single LLM call.
@@ -862,10 +868,34 @@ def generate_playlist_single_call(
     candidate_text = "\n".join(lines)
 
     # -- 3. System prompt --------------------------------------------------
+    # P2: the picker previously only ever saw explicit artists; albums and
+    # genres affected pool weighting but were invisible to the LLM, so it had
+    # no way to connect a vibe phrase to the matching rows in the list.
+    explicit_bits = []
     if explicit_artists:
+        explicit_bits.append(f"artists: {', '.join(explicit_artists)}")
+    if explicit_albums:
+        explicit_bits.append(f"albums: {', '.join(explicit_albums)}")
+    if explicit_genres:
+        explicit_bits.append(f"genres: {', '.join(explicit_genres)}")
+    if mode == "free":
         explicit_line = (
-            f"- The user specifically requested these artists: {', '.join(explicit_artists)}. "
-            "Strongly prefer songs by them and do NOT enforce artist diversity against them.\n"
+            f"- The user specifically requested: {'; '.join(explicit_bits)}. "
+            "Strongly prefer songs matching this request and do NOT enforce "
+            "artist diversity against them.\n"
+        )
+    elif mode == "anchor" and explicit_bits:
+        explicit_line = (
+            f"- The user specifically requested: {'; '.join(explicit_bits)}. "
+            "Include a meaningful number of songs matching this request, but "
+            "the rest of the playlist should follow the stated vibe; keep the "
+            "requested artists well under half of the playlist.\n"
+        )
+    elif explicit_bits:
+        explicit_line = (
+            f"- The user specifically requested: {'; '.join(explicit_bits)}. "
+            "Strongly prefer songs matching this request, but still keep "
+            "artist diversity.\n"
         )
     else:
         explicit_line = "- Ensure artist diversity; avoid over-representing any single artist.\n"
@@ -942,7 +972,11 @@ def generate_playlist_single_call(
     # Pad if needed
     if len(playlist) < min_songs:
         playlist = ensure_min_songs(
-            playlist, filtered_songs, min_songs, explicit_artists=explicit_artists
+            playlist,
+            filtered_songs,
+            min_songs,
+            explicit_artists=explicit_artists,
+            mode=mode,
         )
 
     # Trim if the LLM overshot: min_songs means exactly N, keep highest-relevance.
@@ -957,6 +991,9 @@ def generate_playlist_chunked(
     min_songs: int,
     chunk_size: int = 200,
     explicit_artists: list[str] = None,
+    explicit_albums: list[str] = None,
+    explicit_genres: list[str] = None,
+    mode: str = "default",
 ) -> list[dict]:
     """
     Generate playlist using chunked processing for large candidate pools.
@@ -978,6 +1015,9 @@ def generate_playlist_chunked(
             filtered_songs=filtered_songs,
             min_songs=min_songs,
             explicit_artists=explicit_artists,
+            explicit_albums=explicit_albums,
+            explicit_genres=explicit_genres,
+            mode=mode,
         )
 
     # Split into chunks, maintaining score order (already sorted)
@@ -1006,6 +1046,9 @@ def generate_playlist_chunked(
                 filtered_songs=chunk,
                 min_songs=chunk_target,
                 explicit_artists=explicit_artists,
+                explicit_albums=explicit_albums,
+                explicit_genres=explicit_genres,
+                mode=mode,
             )
             all_selections.extend(chunk_playlist)
         except Exception as e:
@@ -1034,7 +1077,11 @@ def generate_playlist_chunked(
     # If we don't have enough, pad with top-scored unused songs
     if len(unique_selections) < min_songs:
         unique_selections = ensure_min_songs(
-            unique_selections, filtered_songs, min_songs, explicit_artists=explicit_artists
+            unique_selections,
+            filtered_songs,
+            min_songs,
+            explicit_artists=explicit_artists,
+            mode=mode,
         )
 
     # Trim to exactly min_songs by relevance (not positional), matching the
@@ -1270,18 +1317,27 @@ def select_context_playlist_songs(
     return songs
 
 
-def _context_overlaps_explicit_artists(
-    context_songs: list[dict], explicit_artists: list[str]
+def _context_overlaps_explicit(
+    context_songs: list[dict],
+    explicit_artists: list[str] = None,
+    explicit_albums: list[str] = None,
 ) -> bool:
-    """True if any explicitly requested artist appears among the context songs.
+    """True if any explicitly requested artist or album appears among the
+    context songs (P0 entity-aware context gate).
 
-    Splits multi-artist strings the same way scoring does (`_split_artist_string`)
-    so a "A & B" credit counts as both A and B, matching `set(explicit_artists)`
-    membership exactly.
+    Splits multi-artist strings the same way scoring does
+    (`_split_artist_string`) so a "A & B" credit counts as both A and B;
+    albums compare case-insensitively on the exact album string.
     """
-    wanted = set(explicit_artists)
+    wanted_artists = {a.lower() for a in (explicit_artists or [])}
+    wanted_albums = {a.lower() for a in (explicit_albums or [])}
     for s in context_songs:
-        if any(a in wanted for a in _split_artist_string(s.get("artist", ""))):
+        if wanted_albums and (s.get("album") or "").lower() in wanted_albums:
+            return True
+        if wanted_artists and any(
+            a.lower() in wanted_artists
+            for a in _split_artist_string(s.get("artist", ""))
+        ):
             return True
     return False
 
@@ -1297,12 +1353,14 @@ def ensure_min_songs(
     min_songs: int,
     max_songs: int = 50,
     explicit_artists: list[str] = None,
+    mode: str = "default",
 ) -> list[dict]:
     """
     Pad *playlist* up to *min_songs* using the highest-relevance unused
     candidates (descending `_relevance_score`, with only minor tie-breaking
-    randomness). Padding respects the variant-dedup rules and, when no explicit
-    artists were requested, the adaptive per-artist cap.
+    randomness). Padding respects the variant-dedup rules and a mode-aware
+    per-artist cap (P3: free = no cap, anchor = relaxed cap for named
+    artists, default = adaptive cap for everyone).
     """
     if len(playlist) >= min_songs:
         return playlist[:max_songs]
@@ -1318,10 +1376,17 @@ def ensure_min_songs(
         full = id_lookup.get(p["id"])
         if full:
             existing_keys.add(_variant_dedup_key(full))
-            a = _split_artist_string(full.get("artist") or "")
-            artist_counts[a[0].lower() if a else ""] += 1
+            for n in [
+                x.lower() for x in _split_artist_string(full.get("artist") or "")
+            ] or [""]:
+                artist_counts[n] += 1
 
-    cap = None if explicit_artists else max(2, math.ceil(0.15 * min_songs))
+    if mode == "free":
+        cap = None
+    elif mode == "anchor" and explicit_artists:
+        cap = max(2, math.ceil(_ANCHOR_CAP_FRAC * min_songs))
+    else:
+        cap = max(2, math.ceil(_ADAPTIVE_CAP_FRAC * min_songs))
 
     remaining = [s for s in candidates if s["id"] not in existing_ids]
     # Descending relevance, minor tie-breaking randomness only.
@@ -1336,13 +1401,13 @@ def ensure_min_songs(
         k = _variant_dedup_key(s)
         if k in existing_keys:
             continue
-        a = _split_artist_string(s.get("artist") or "")
-        pa = a[0].lower() if a else ""
-        if cap is not None and artist_counts[pa] >= cap:
+        names = [n.lower() for n in _split_artist_string(s.get("artist") or "")]
+        if cap is not None and any(artist_counts[n] >= cap for n in names or [""]):
             continue
         playlist.append({"id": s["id"], "title": s.get("title")})
         existing_keys.add(k)
-        artist_counts[pa] += 1
+        for n in names or [""]:
+            artist_counts[n] += 1
         added += 1
 
     print(
@@ -1364,44 +1429,67 @@ def _dedup_playlist_variants(
     return [{"id": s["id"], "title": s.get("title")} for s in deduped]
 
 
+_ADAPTIVE_CAP_FRAC = 0.15  # per-artist cap, default mode (P3)
+_ANCHOR_CAP_FRAC = 0.45    # relaxed per-artist cap for named artists, anchor mode (P3)
+_ALBUM_CAP_FRAC = 0.30     # per-album cap (P6)
+
+
 def _enforce_artist_cap(
     playlist: list[dict],
     candidates: list[dict],
     target_size: int,
     explicit_artists: list[str] = None,
+    mode: str = "default",
 ) -> list[dict]:
     """
-    Adaptive post-selection per-artist cap. Only applies when *explicit_artists*
-    is empty (deliberate 1-2 artist mixes are never capped). Cap =
-    max(2, ceil(0.15 * target_size)). Songs over the cap for an artist (keeping
-    the highest-relevance ones) are replaced by the highest-relevance unused
-    candidates from other artists, respecting the dedup rules and the cap.
+    Mode-aware post-selection per-artist cap (P3, replaces the old binary
+    'explicit artists => never cap' rule).
+
+    - mode "free": entity-dominant prompt that names artists ("Michael
+      Jackson", "just Radiohead and Portishead") - no cap, as before.
+    - mode "anchor": named (anchor) artists get the relaxed anchor cap; every
+      other artist keeps the adaptive base cap.
+    - mode "default": adaptive cap for everyone.
+
+    Every credited artist in a multi-artist string counts (not just the
+    primary), matching how run history reports artist percentages. Over-cap
+    picks (keeping the highest-relevance ones per artist) are replaced by the
+    highest-relevance unused candidates, respecting the cap and dedup rules.
     """
-    if explicit_artists:
+    if mode == "free":
         return playlist
 
-    cap = max(2, math.ceil(0.15 * target_size))
-    id_lookup = {s["id"]: s for s in candidates}
+    base_cap = max(2, math.ceil(_ADAPTIVE_CAP_FRAC * target_size))
+    anchor_cap = max(2, math.ceil(_ANCHOR_CAP_FRAC * target_size))
+    anchor_set = {a.lower() for a in (explicit_artists or [])}
 
-    def primary_artist(song_or_item: dict) -> str:
-        full = id_lookup.get(song_or_item.get("id"), song_or_item)
-        a = _split_artist_string(full.get("artist") or "")
-        return a[0].lower() if a else ""
+    def cap_for(artist_lc: str) -> int:
+        if mode == "anchor" and artist_lc in anchor_set:
+            return anchor_cap
+        return base_cap
+
+    id_lookup = {s["id"]: s for s in candidates}
 
     def relscore(item: dict) -> float:
         return id_lookup.get(item.get("id"), {}).get("_relevance_score", 0)
 
-    # Decide which picks to keep per artist: highest relevance up to the cap.
+    def artist_names(song_or_item: dict) -> list[str]:
+        full = id_lookup.get(song_or_item.get("id"), song_or_item)
+        return [n.lower() for n in _split_artist_string(full.get("artist") or "")]
+
+    # Decide which picks to keep per artist: highest relevance up to that
+    # artist's cap. A multi-credit song counts against every artist named.
     from collections import defaultdict
 
     by_artist: dict[str, list[dict]] = defaultdict(list)
     for item in playlist:
-        by_artist[primary_artist(item)].append(item)
+        for n in artist_names(item) or [""]:
+            by_artist[n].append(item)
 
     keep_ids: set[str] = set()
-    for _artist, items in by_artist.items():
+    for artist, items in by_artist.items():
         items_sorted = sorted(items, key=relscore, reverse=True)
-        for it in items_sorted[:cap]:
+        for it in items_sorted[: cap_for(artist)]:
             keep_ids.add(it["id"])
 
     kept: list[dict] = []
@@ -1413,7 +1501,8 @@ def _enforce_artist_cap(
         if item["id"] in keep_ids:
             kept.append(item)
             kept_ids.add(item["id"])
-            artist_counts[primary_artist(item)] += 1
+            for n in artist_names(item) or [""]:
+                artist_counts[n] += 1
             full = id_lookup.get(item["id"])
             if full:
                 existing_keys.add(_variant_dedup_key(full))
@@ -1436,21 +1525,236 @@ def _enforce_artist_cap(
             break
         if s["id"] in kept_ids:
             continue
-        pa = primary_artist(s)
-        if artist_counts[pa] >= cap:
+        names = artist_names(s)
+        if any(artist_counts[n] >= cap_for(n) for n in names or [""]):
             continue
         k = _variant_dedup_key(s)
         if k in existing_keys:
             continue
         kept.append({"id": s["id"], "title": s.get("title")})
         kept_ids.add(s["id"])
-        artist_counts[pa] += 1
+        for n in names or [""]:
+            artist_counts[n] += 1
         existing_keys.add(k)
 
     print(
-        f"Artist cap ({cap}/artist) enforced: replaced {removed} over-cap pick(s)."
+        f"Artist cap (mode={mode}, base={base_cap}, anchor={anchor_cap}) "
+        f"enforced: replaced {removed} over-cap pick(s)."
     )
     return kept
+
+
+def _enforce_album_cap(
+    playlist: list[dict],
+    candidates: list[dict],
+    target_size: int,
+    explicit_albums: list[str] = None,
+) -> list[dict]:
+    """
+    Per-album cap (P6): at most max(2, ceil(_ALBUM_CAP_FRAC * target_size))
+    tracks from a single album, unless that album was explicitly named in the
+    prompt (a deliberate whole-album request is exempt - that's the point of
+    naming the album). Over-cap picks (keeping the highest-relevance ones per
+    album) are replaced by the highest-relevance unused candidates from other
+    non-exempt albums, respecting the variant-dedup rules.
+    """
+    from collections import defaultdict
+
+    cap = max(2, math.ceil(_ALBUM_CAP_FRAC * target_size))
+    exempt = {a.lower() for a in (explicit_albums or [])}
+    id_lookup = {s["id"]: s for s in candidates}
+
+    def album_of(item: dict) -> str:
+        full = id_lookup.get(item.get("id"), item)
+        return (full.get("album") or "").lower()
+
+    def relscore(item: dict) -> float:
+        return id_lookup.get(item.get("id"), {}).get("_relevance_score", 0)
+
+    by_album: dict[str, list[dict]] = defaultdict(list)
+    for item in playlist:
+        by_album[album_of(item)].append(item)
+
+    keep_ids: set[str] = set()
+    for album, items in by_album.items():
+        if album in exempt or len(items) <= cap:
+            keep_ids.update(it["id"] for it in items)
+            continue
+        items_sorted = sorted(items, key=relscore, reverse=True)
+        keep_ids.update(it["id"] for it in items_sorted[:cap])
+
+    kept: list[dict] = []
+    kept_ids: set[str] = set()
+    album_counts: Counter = Counter()
+    existing_keys: set[tuple] = set()
+    removed = 0
+    for item in playlist:  # preserve original order for the retained picks
+        if item["id"] in keep_ids:
+            kept.append(item)
+            kept_ids.add(item["id"])
+            album_counts[album_of(item)] += 1
+            full = id_lookup.get(item["id"])
+            if full:
+                existing_keys.add(_variant_dedup_key(full))
+        else:
+            removed += 1
+
+    if removed == 0:
+        return kept
+
+    # Backfill removed slots with the best-scoring alternatives from other
+    # non-exempt albums, respecting the cap and dedup rules.
+    target_len = len(playlist)
+    pool = sorted(
+        candidates,
+        key=lambda s: (s.get("_relevance_score", 0), random.random()),
+        reverse=True,
+    )
+    for s in pool:
+        if len(kept) >= target_len:
+            break
+        if s["id"] in kept_ids:
+            continue
+        al = (s.get("album") or "").lower()
+        if al in exempt or album_counts[al] >= cap:
+            continue
+        k = _variant_dedup_key(s)
+        if k in existing_keys:
+            continue
+        kept.append({"id": s["id"], "title": s.get("title")})
+        kept_ids.add(s["id"])
+        album_counts[al] += 1
+        existing_keys.add(k)
+
+    print(
+        f"Album cap ({cap}/album, exempt={sorted(exempt) or 'none'}) enforced: "
+        f"replaced {removed} over-cap pick(s)."
+    )
+    return kept
+
+
+def _guarantee_explicit(
+    playlist: list[dict],
+    candidates: list[dict],
+    explicit_artists: list[str] = None,
+    explicit_albums: list[str] = None,
+    explicit_tracks: list[dict] = None,
+) -> list[dict]:
+    """
+    P3 guaranteed inclusion. Runs AFTER the caps so the user's actual request
+    can't be evicted by them:
+    - every explicitly named track appears at least once,
+    - every explicitly named album has >=3 tracks in the mix,
+    - every explicitly named artist has >=3 tracks in the mix.
+    Missing entity tracks are swapped in for the lowest-relevance non-protected
+    picks (protected = matches any explicit entity), variant-dedup respected.
+    """
+    explicit_artists = explicit_artists or []
+    explicit_albums = explicit_albums or []
+    explicit_tracks = explicit_tracks or []
+    if not (explicit_artists or explicit_albums or explicit_tracks):
+        return playlist
+
+    id_lookup = {s["id"]: s for s in candidates}
+    explicit_album_set = {a.lower() for a in explicit_albums}
+    explicit_artist_set = {a.lower() for a in explicit_artists}
+    explicit_title_set = {
+        (t.get("title") or "").lower() for t in explicit_tracks if t.get("title")
+    }
+
+    def is_protected(song: dict) -> bool:
+        if not song:
+            return False
+        if (song.get("album") or "").lower() in explicit_album_set:
+            return True
+        if (song.get("title") or "").lower() in explicit_title_set:
+            return True
+        return any(
+            a.lower() in explicit_artist_set
+            for a in _split_artist_string(song.get("artist") or "")
+        )
+
+    have_titles: set[str] = set()
+    album_counts: Counter = Counter()
+    artist_counts: Counter = Counter()
+    for item in playlist:
+        full = id_lookup.get(item["id"])
+        if not full:
+            continue
+        have_titles.add((full.get("title") or "").lower())
+        album_counts[(full.get("album") or "").lower()] += 1
+        for n in _split_artist_string(full.get("artist") or ""):
+            artist_counts[n.lower()] += 1
+
+    # Build the set of songs still needed to satisfy the explicit request.
+    wanted: list[dict] = []
+    for t in explicit_tracks:
+        if (t.get("title") or "").lower() not in have_titles:
+            wanted.append(t)
+    for al in explicit_albums:
+        need = max(0, 3 - album_counts.get(al.lower(), 0))
+        if need:
+            cands = sorted(
+                (s for s in candidates if (s.get("album") or "").lower() == al.lower()),
+                key=lambda s: s.get("_relevance_score", 0),
+                reverse=True,
+            )
+            wanted.extend(cands[:need])
+    for ar in explicit_artists:
+        arl = ar.lower()
+        need = max(0, 3 - artist_counts.get(arl, 0))
+        if need:
+            cands = sorted(
+                (
+                    s
+                    for s in candidates
+                    if any(
+                        n.lower() == arl
+                        for n in _split_artist_string(s.get("artist") or "")
+                    )
+                ),
+                key=lambda s: s.get("_relevance_score", 0),
+                reverse=True,
+            )
+            wanted.extend(cands[:need])
+
+    if not wanted:
+        return playlist
+
+    existing_ids = {item["id"] for item in playlist}
+    existing_keys: set[tuple] = set()
+    for item in playlist:
+        full = id_lookup.get(item["id"])
+        if full:
+            existing_keys.add(_variant_dedup_key(full))
+
+    # Evict lowest-relevance unprotected picks first; protected picks stay.
+    evictable = [
+        item for item in playlist if not is_protected(id_lookup.get(item["id"]))
+    ]
+    evictable.sort(
+        key=lambda item: id_lookup.get(item["id"], {}).get("_relevance_score", 0)
+    )
+
+    added = 0
+    for cand in wanted:
+        if not evictable:
+            break
+        if cand["id"] in existing_ids:
+            continue
+        k = _variant_dedup_key(cand)
+        if k in existing_keys:
+            continue
+        victim = evictable.pop(0)
+        playlist = [item for item in playlist if item["id"] != victim["id"]]
+        playlist.append({"id": cand["id"], "title": cand.get("title")})
+        existing_ids.add(cand["id"])
+        existing_keys.add(k)
+        added += 1
+
+    if added:
+        print(f"Guaranteed inclusion: swapped in {added} explicit request track(s).")
+    return playlist
 
 
 # --------------------------------------------------
@@ -1535,8 +1839,10 @@ def extract_prompt_entities(
         for item in items:
             item_lc = item.lower()
             item_words = set(re.findall(r"\b\w+\b", item_lc)) - STOPWORDS
-            # Exact match (full item name in prompt)
-            if item_lc in prompt_lc:
+            # Exact match (full item name in prompt). Word-bounded so a short
+            # title can't match as a fragment of unrelated words ("on" in
+            # "one more song" must not resolve an album literally titled "On").
+            if re.search(rf"\b{re.escape(item_lc)}\b", prompt_lc):
                 entities[key].append(item)
             # Partial match (ALL significant words from item must be in prompt)
             elif len(item_words) >= 2 and item_words.issubset(prompt_words):
@@ -1564,6 +1870,31 @@ def extract_prompt_entities(
                 entities["artists"].append(item)
                 print(f"Fuzzy-matched artist: '{item}' (approximate prompt match)")
 
+    # P1 initials expansion: "mj" -> "Michael Jackson". The exact/partial/fuzzy
+    # passes can never connect initials to full names, so letter tokens of 1-3
+    # chars are tested against each artist's initials (first letter of every
+    # significant word). Accepted only when the initials are UNIQUE in the
+    # library, so ambiguous tokens never resolve. Matched tokens are recorded
+    # so mode classification (P3) doesn't count them as vibe content.
+    letter_tokens = {w for w in prompt_words if 1 <= len(w) <= 3 and w.isalpha()}
+    if letter_tokens:
+        initials_map: dict[str, set[str]] = {}
+        for item in all_artists:
+            init_words = [
+                w for w in re.findall(r"\b\w+\b", item.lower()) if w not in STOPWORDS
+            ]
+            init = "".join(w[0] for w in init_words)
+            if 2 <= len(init) <= 4:
+                initials_map.setdefault(init, set()).add(item)
+        for tok in sorted(letter_tokens):
+            matches = initials_map.get(tok)
+            if matches and len(matches) == 1:
+                artist = next(iter(matches))
+                if artist not in entities["artists"]:
+                    entities["artists"].append(artist)
+                    entities.setdefault("initials_tokens", set()).add(tok)
+                    print(f"Initials-matched artist: '{tok}' -> {artist}")
+
     # Albums: check both exact and partial matches
     check_matches(all_albums, "albums")
 
@@ -1573,6 +1904,82 @@ def extract_prompt_entities(
             entities["genres"].append(genre)
 
     return entities
+
+
+# --------------------------------------------------
+# PROMPT TRACK EXTRACTION + MODE CLASSIFICATION (P3)
+# --------------------------------------------------
+
+_DOMINANCE_IGNORE = {
+    # Functional/quantifier/positional words that carry no vibe content.
+    # Kept separate from STOPWORDS on purpose: STOPWORDS feeds entity word-set
+    # matching (words like "just" can be part of an artist/album name), while
+    # this set only trims prompt content for the dominance test.
+    "just", "only", "all", "start", "with",
+    "song", "songs", "track", "tracks", "playlist",
+    "give", "make", "create", "build", "put", "me",
+}
+
+
+def extract_prompt_tracks(prompt: str, all_songs: list[dict]) -> list[dict]:
+    """Tracks whose full title appears word-bounded in the prompt.
+
+    Only titles with >=2 significant words are eligible (single-word titles
+    like "Love" or "Fire" are far too ambiguous to pin from a prompt phrase).
+    Returns one representative song dict per matched title.
+    """
+    prompt_lc = prompt.lower()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for s in all_songs:
+        title = (s.get("title") or "").strip()
+        if not title:
+            continue
+        title_lc = title.lower()
+        if title_lc in seen:
+            continue
+        if len([w for w in re.findall(r"\b\w+\b", title_lc) if w not in STOPWORDS]) < 2:
+            continue
+        if re.search(rf"\b{re.escape(title_lc)}\b", prompt_lc):
+            seen.add(title_lc)
+            out.append(s)
+    return out
+
+
+def classify_prompt_mode(prompt: str, entities: dict) -> str:
+    """Classify the prompt into a selection mode (P3; replaces the old binary
+    'explicit artists => no cap' rule, which backfired on anchor prompts).
+
+    - "free": prompt is entity-dominant (no vibe content words beyond the
+      named entities + their initials) AND names at least one artist.
+      Deliberate 1-2-artist mixes ("Michael Jackson", "just Radiohead and
+      Portishead") keep the old no-cap behavior.
+    - "anchor": prompt names explicit entities but ALSO contains vibe/scene
+      content ("...upbeat work mix"). Named entities are guaranteed present
+      (_guarantee_explicit) and anchor artists are capped (_ANCHOR_CAP_FRAC);
+      the rest follows the vibe. Album-only entity-dominant prompts ("off the
+      wall mix") land here too: the album is guaranteed but the adaptive
+      artist cap stays on (a named album is not a named artist).
+    - "default": nothing explicit; adaptive caps as before.
+    """
+    prompt_words = set(re.findall(r"\b\w+\b", prompt.lower()))
+    entity_words: set[str] = set()
+    for kind in ("artists", "albums", "tracks"):
+        for item in entities.get(kind, []):
+            if kind == "tracks" and isinstance(item, dict):
+                item = item.get("title", "")
+            entity_words |= set(re.findall(r"\b\w+\b", str(item).lower()))
+    entity_words |= set(entities.get("initials_tokens", ()))
+    content = prompt_words - STOPWORDS - _DOMINANCE_IGNORE - entity_words
+    entity_dominant = not content
+    has_entities = bool(
+        entities.get("artists") or entities.get("albums") or entities.get("tracks")
+    )
+    if has_entities and entity_dominant and entities.get("artists"):
+        return "free"
+    if has_entities:
+        return "anchor"
+    return "default"
 
 
 # --------------------------------------------------
@@ -1750,33 +2157,49 @@ def _main_impl(args):
     start_t = time.time()
 
     # Extract explicit mentions from prompt FIRST, so context selection is aware
-    # of any explicit-artist request (used to discard an off-artist context
-    # playlist just below). Only depends on prompt + catalog lists.
+    # of any explicit request (used to discard an off-target context playlist
+    # just below). Only depends on prompt + catalog lists.
     prompt_entities = extract_prompt_entities(
         prompt, all_artists, all_genres, all_albums
     )
     explicit_artists = prompt_entities["artists"]
     explicit_genres = prompt_entities["genres"]
     explicit_albums = prompt_entities["albums"]
+    explicit_tracks = extract_prompt_tracks(prompt, all_songs)
+    prompt_entities["tracks"] = explicit_tracks
+    mode = classify_prompt_mode(prompt, prompt_entities)
     era_range = detect_prompt_era(prompt)
+    # P5: mode + full entity set are decision-critical and previously unlogged.
+    print(
+        f"Prompt mode: {mode} | artists={explicit_artists or '-'} | "
+        f"albums={explicit_albums or '-'} | genres={explicit_genres or '-'} | "
+        f"tracks={[t.get('title') for t in explicit_tracks] or '-'}"
+    )
 
     existing_playlists = fetch_all_playlists(exclude_name=playlist_name)
     context_songs = select_context_playlist_songs(
         prompt, existing_playlists, all_songs, embedding_manager=embedding_manager
     )
 
-    # If the user named explicit artist(s) but the chosen context playlist has
-    # none of them, discard it. Its context bonuses (+4.0 in-playlist, +2.0
-    # metadata) can otherwise outrank the +3.0 explicit-artist bonus and pull in
-    # off-artist tracks (e.g. "michael jackson mix" picking an indie-rock list).
+    # P0 context gate: if the prompt names explicit artist(s) or album(s) but
+    # the chosen context playlist contains none of them, discard it. Its
+    # context bonuses (+4.0 in-playlist, +2.0 metadata) can otherwise outrank
+    # explicit matches and pull in off-target tracks (e.g. "michael jackson
+    # mix" picking an indie-rock list; test_dj_override poisoning 5 straight
+    # runs on Sep 9). The 0.15 semantic floor alone never fired (observed
+    # scores 0.443-0.684), so this entity check is the effective gate.
     if (
-        explicit_artists
+        (explicit_artists or explicit_albums)
         and context_songs
-        and not _context_overlaps_explicit_artists(context_songs, explicit_artists)
+        and not _context_overlaps_explicit(
+            context_songs, explicit_artists, explicit_albums
+        )
     ):
         print(
             f"Discarding context playlist: no songs by requested artist(s) "
-            f"{', '.join(explicit_artists)}."
+            f"{', '.join(explicit_artists) or '-'} or from requested album(s) "
+            f"{', '.join(explicit_albums) or '-'}. The 0.15 semantic floor "
+            f"passed; this entity check rejected it (P5 log)."
         )
         context_songs = []
 
@@ -1807,6 +2230,13 @@ def _main_impl(args):
         print(f"Explicit artists identified: {', '.join(explicit_artists)}")
     if explicit_genres:
         print(f"Explicit genres identified: {', '.join(explicit_genres)}")
+    if explicit_albums:
+        print(f"Explicit albums identified: {', '.join(explicit_albums)}")
+    if explicit_tracks:
+        print(
+            "Explicit tracks identified: "
+            + ", ".join(t.get("title") or "?" for t in explicit_tracks)
+        )
     if era_range:
         print(f"Implied era detected: {era_range[0]}-{era_range[1]} (loose scoring bonus only)")
 
@@ -1908,6 +2338,9 @@ def _main_impl(args):
         min_songs=args.min_songs,
         chunk_size=args.chunk_size,
         explicit_artists=explicit_artists,
+        explicit_albums=explicit_albums,
+        explicit_genres=explicit_genres,
+        mode=mode,
     )
     print(
         f"Final playlist generated: {len(playlist_items)} tracks ({time.time() - start_t:.1f}s)"
@@ -1930,9 +2363,28 @@ def _main_impl(args):
     if len(playlist_items) < before:
         print(f"Final dedup pass: removed {before - len(playlist_items)} variant duplicate(s).")
 
-    # Adaptive per-artist cap (only when no explicit artists were requested).
+    # Per-artist cap, mode-aware (P3: free / anchor / default).
     playlist_items = _enforce_artist_cap(
-        playlist_items, candidate_pool, args.min_songs, explicit_artists
+        playlist_items,
+        candidate_pool,
+        args.min_songs,
+        explicit_artists,
+        mode=mode,
+    )
+
+    # Per-album cap (P6): no album may dominate unless explicitly named.
+    playlist_items = _enforce_album_cap(
+        playlist_items, candidate_pool, args.min_songs, explicit_albums
+    )
+
+    # P3 guaranteed inclusion: the user's actual request (named tracks/albums/
+    # artists) must survive the caps, so this runs AFTER them.
+    playlist_items = _guarantee_explicit(
+        playlist_items,
+        candidate_pool,
+        explicit_artists=explicit_artists,
+        explicit_albums=explicit_albums,
+        explicit_tracks=explicit_tracks,
     )
 
     # Top up if the quality passes dropped us below the requested minimum.
@@ -1942,6 +2394,7 @@ def _main_impl(args):
             candidate_pool,
             args.min_songs,
             explicit_artists=explicit_artists,
+            mode=mode,
         )
 
     # ========== STRUCTURED OUTPUT FOR FRONTEND ==========

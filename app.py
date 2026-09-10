@@ -20,7 +20,6 @@ app.secret_key = os.urandom(24)  # Required for session management
 
 # Import your existing scripts
 import naviDJ
-import portLibrary
 
 # Global queue for script output
 output_queues = {}
@@ -331,7 +330,9 @@ def run_dj():
 
             rc = process.poll()
             if rc not in (0, None):
-                queue.put(f"ERROR: naviDJ exited with code {rc}")
+                err_line = f"ERROR: naviDJ exited with code {rc}"
+                captured.append(err_line)  # persist to history log (was queue-only)
+                queue.put(err_line)
 
             playlist = None
             for line in reversed(captured):
