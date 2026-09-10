@@ -1509,7 +1509,39 @@ def _enforce_artist_cap(
         else:
             removed += 1
 
-    if removed == 0:
+    # Hard-cap pass: keep_ids is a UNION of per-artist top-N, so one artist's
+    # keep budget can rescue a track that over-credits another artist (a
+    # "Logic • Pusha T" pick kept for Pusha T still counts against Logic's
+    # anchor cap). Enforce each artist's cap as a hard ceiling on total
+    # credited tracks by evicting the lowest-relevance over-cap picks.
+    def _credit_counts(items: list[dict]) -> Counter:
+        cc: Counter = Counter()
+        for it in items:
+            for n in artist_names(it) or [""]:
+                cc[n] += 1
+        return cc
+
+    evicted = 0
+    while True:
+        counts = _credit_counts(kept)
+        over = {a for a, c in counts.items() if c > cap_for(a)}
+        if not over:
+            break
+        victims = [
+            it for it in kept if over.intersection(artist_names(it) or [""])
+        ]
+        if not victims:
+            break
+        victim = min(victims, key=lambda it: relscore(it))
+        kept.remove(victim)
+        kept_ids.discard(victim["id"])
+        full = id_lookup.get(victim["id"])
+        if full:
+            existing_keys.discard(_variant_dedup_key(full))
+        evicted += 1
+    artist_counts = _credit_counts(kept)
+
+    if not (removed or evicted):
         return kept
 
     # Backfill removed slots with the best-scoring alternatives from other
@@ -1539,7 +1571,7 @@ def _enforce_artist_cap(
 
     print(
         f"Artist cap (mode={mode}, base={base_cap}, anchor={anchor_cap}) "
-        f"enforced: replaced {removed} over-cap pick(s)."
+        f"enforced: replaced {removed + evicted} over-cap pick(s)."
     )
     return kept
 
