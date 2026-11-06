@@ -61,7 +61,7 @@ def is_secret_key(key):
 
 
 def read_secrets():
-    secrets = configparser.ConfigParser()
+    secrets = configparser.ConfigParser(interpolation=None)
     secrets.read('secrets.txt')
     return secrets
 
@@ -74,7 +74,7 @@ def masked_secrets():
     configured. Non-secret settings pass through unchanged.
     """
     secrets = read_secrets()
-    masked = configparser.ConfigParser()
+    masked = configparser.ConfigParser(interpolation=None)
     flags = {}
     for section in secrets.sections():
         masked.add_section(section)
@@ -95,7 +95,7 @@ def write_secrets(config_data):
     submission means "leave this one alone", not "clear it". Non-secret
     settings round-trip normally, including intentional clears.
     """
-    secrets = configparser.ConfigParser()
+    secrets = configparser.ConfigParser(interpolation=None)
     current = read_secrets()
 
     # Start from the existing on-disk config.
@@ -189,6 +189,49 @@ def check_spotify_auth():
             return {"authenticated": False, "error": "No cached token found"}
     except Exception as e:
         return {"authenticated": False, "error": str(e)}
+
+def list_providers(cfg=None):
+    """A provider is any secrets section that declares a `base` URL.
+
+    One shape for everything OpenAI-compatible (sglang, llama.cpp, Ollama, OpenAI).
+    2026-11-06: replaces the api_type (openai/ollama/custom) branching, which had
+    ended up routing model discovery through the Open WebUI proxy.
+    """
+    cfg = cfg or read_secrets()
+    out = []
+    for section in cfg.sections():
+        if not cfg.has_option(section, "base"):
+            continue
+        out.append({
+            "id": section,
+            "label": cfg.get(section, "label", fallback=section),
+            "base": cfg.get(section, "base"),
+            "role": cfg.get(section, "role", fallback="chat"),
+        })
+    return out
+
+
+def provider_models(cfg, provider_id):
+    """GET {provider.base}/models — the only model-discovery path there is."""
+    base = cfg.get(provider_id, "base", fallback=None) if cfg.has_section(provider_id) else None
+    if not base:
+        return {"error": f"unknown provider '{provider_id}'"}
+    api_key = cfg.get(provider_id, "api_key", fallback="")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    url = base.rstrip("/") + "/models"
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code != 200:
+            return {"error": f"{provider_id}: HTTP {response.status_code} from {url}"}
+        data = response.json()
+        if isinstance(data, dict) and "data" in data:
+            return [m.get("id") for m in data["data"]]
+        if isinstance(data, list):
+            return [m.get("id") or m.get("name") for m in data]
+        return {"error": f"{provider_id}: unexpected /models payload"}
+    except Exception as e:
+        return {"error": f"{provider_id}: {str(e)[:160]}"}
+
 
 def get_available_models(api_type, api_key=None, base_url=None):
     """Fetch available models from the specified API provider."""
@@ -477,12 +520,16 @@ def stream(task_id):
 def get_models(api_type):
     """Get available models for the specified API type."""
     secrets = read_secrets()
-    
+
+    # 2026-11-06: anything that is not a legacy api_type is a provider id.
+    if api_type not in ("openai", "ollama", "custom"):
+        return jsonify(provider_models(secrets, api_type))
+
     if api_type == "openai":
         api_key = secrets.get("openai", "openai_key", fallback=None)
         return jsonify(get_available_models("openai", api_key=api_key))
     elif api_type == "ollama":
-        base_url = secrets.get("ollama", "ollama_base", fallback=None)
+        base_url = secrets.get("ollama", "base", fallback=secrets.get("ollama", "ollama_base", fallback=None))
         api_key = secrets.get("ollama", "api_key", fallback=None)
         return jsonify(get_available_models("ollama", api_key=api_key, base_url=base_url))
     elif api_type == "custom":
@@ -492,13 +539,23 @@ def get_models(api_type):
     else:
         return jsonify({"error": "Invalid API type"})
 
+@app.route('/get_providers')
+def get_providers():
+    """List configured providers (any secrets section with a `base` URL)."""
+    return jsonify(list_providers())
+
+
 @app.route('/get_embedding_models/<api_type>')
 def get_embedding_models(api_type):
     """Get available embedding models for the specified API type."""
     secrets = read_secrets()
+
+    # 2026-11-06: provider ids resolve like any other provider list.
+    if api_type not in ("openai", "ollama", "custom"):
+        return jsonify(provider_models(secrets, api_type))
     
     if api_type == "ollama":
-        base_url = secrets.get("ollama", "ollama_base", fallback=None)
+        base_url = secrets.get("ollama", "base", fallback=secrets.get("ollama", "ollama_base", fallback=None))
         if not base_url:
             return jsonify({"error": "Ollama base URL not configured"})
         

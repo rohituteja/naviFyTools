@@ -12,3 +12,4 @@ playlist_history.json
 venv/
 .idea/
 .vscode/
+secrets.txt*

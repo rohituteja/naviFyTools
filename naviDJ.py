@@ -50,11 +50,12 @@ from embeddings import EmbeddingManager
 # --------------------------------------------------
 
 # Load secrets from secrets.txt
-secrets = configparser.ConfigParser()
+secrets = configparser.ConfigParser(interpolation=None)
 secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 
 DEFAULT_OPENAI_KEY = secrets.get("openai", "openai_key", fallback=None)
 DEFAULT_OLLAMA_BASE = secrets.get("ollama", "ollama_base", fallback=None)
+DEFAULT_EMBED_BASE = secrets.get("ollama", "embed_base", fallback=None)  # 2026-11-02: optional dedicated embed endpoint (e.g. sglang :3537/v1); falls back to ollama_base
 DEFAULT_OLLAMA_API_KEY = secrets.get("ollama", "api_key", fallback=None) or "ollama"
 DEFAULT_CUSTOM_API_KEY = secrets.get("custom", "api_key", fallback=None)
 DEFAULT_CUSTOM_BASE_URL = secrets.get("custom", "base_url", fallback=None)
@@ -316,9 +317,9 @@ def configure_llm(mode: str = None, model: str = None) -> None:
     # Reload secrets to get latest config (important for frontend updates)
     secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 
-    if mode not in {"openai", "ollama", "custom"}:
+    if mode not in {"openai", "ollama", "custom", "provider"}:
         raise ValueError(
-            "Unsupported LLM_MODE. Choose 'openai', 'ollama', or 'custom'."
+            "Unsupported LLM_MODE. Choose 'provider', 'openai', 'ollama', or 'custom'."
         )
 
     LLM_MODE = mode
@@ -339,11 +340,34 @@ def configure_llm(mode: str = None, model: str = None) -> None:
             "ollama", "embedding_model", fallback="nomic-embed-text:latest"
         )
         client = OpenAI(api_key=DEFAULT_OLLAMA_API_KEY, base_url=DEFAULT_OLLAMA_BASE)
+        _embed_base = DEFAULT_EMBED_BASE or DEFAULT_OLLAMA_BASE
+        # 2026-11-02: sglang :3537 serves OpenAI-style /v1/embeddings only; ollama-type paths
+        # (/api/embed) don't exist there. /v1 base => openai api_type (requests go to {base}/embeddings).
+        _embed_type = "openai" if _embed_base.rstrip("/").endswith("/v1") else "ollama"
         embedding_manager = EmbeddingManager(
-            api_type="ollama",
+            api_type=_embed_type,
             model_name=EMBEDDING_MODEL,
-            base_url=DEFAULT_OLLAMA_BASE,
+            base_url=_embed_base,
             api_key=DEFAULT_OLLAMA_API_KEY,
+        )
+    elif mode == "provider":
+        # 2026-11-06: talk to the inference server directly (sglang/llama.cpp/Ollama).
+        # [llm] provider names the secrets section; that section supplies base + api_key.
+        _pvid = secrets.get("llm", "provider", fallback="stinkyserver")
+        _base = secrets.get(_pvid, "base", fallback=None)
+        if not _base:
+            raise ValueError(f"secrets [{_pvid}] has no 'base' — check secrets.txt")
+        LLM_MODEL = model or DEFAULT_LLM_MODEL or "stinkyllm"
+        EMBEDDING_MODEL = secrets.get("llm", "embedding_model", fallback="stinkyembed")
+        _epid = secrets.get("llm", "embedding_provider", fallback=_pvid)
+        _ebase = secrets.get(_epid, "base", fallback=_base)
+        _ekey = secrets.get(_epid, "api_key", fallback="local")
+        client = OpenAI(api_key=secrets.get(_pvid, "api_key", fallback="local"), base_url=_base)
+        embedding_manager = EmbeddingManager(
+            api_type="openai",
+            model_name=EMBEDDING_MODEL,
+            base_url=_ebase,
+            api_key=_ekey,
         )
     else:  # custom
         LLM_MODEL = model or DEFAULT_LLM_MODEL or "gpt-4o-mini"
@@ -515,9 +539,9 @@ def _llm_chat(messages: list[dict], _retries: int = 1, max_tokens: int | None = 
     if max_tokens:
         create_kwargs["max_tokens"] = max_tokens
     if LLM_MODE != "openai":
-        # chat_id required by Open WebUI 0.9.x for external API clients (ignored by native Ollama)
+        # 2026-11-02: OWUI 0.12.4 404s on extra chat_id (was "required" by 0.9.x); only
+        # chat_template_kwargs passes through now.
         create_kwargs["extra_body"] = {
-            "chat_id": "navidj-api",
             "chat_template_kwargs": {"enable_thinking": THINKING_ENABLED},
         }
 

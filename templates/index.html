@@ -104,40 +104,13 @@
                         </div>
 
                         <div id="ollamaConfig" class="config-section mb-2" style="display: none;">
-                            <h5>Ollama / Open WebUI Configuration</h5>
-                            <div class="mb-3">
-                                <label class="form-label">Base URL</label>
-                                <input type="text" class="form-control" name="ollama.ollama_base"
-                                    value="{{ config.get('ollama', 'ollama_base', fallback='') }}" data-section="ollama"
-                                    data-key="ollama_base"
-                                    placeholder="http://localhost:11434/v1 or http://localhost:3000/api">
-                                <small class="form-text text-muted">For Ollama: http://localhost:11434/v1 | For Open
-                                    WebUI: http://localhost:3000/api</small>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">API Key (Optional)</label>
-                                <input type="password" class="form-control" name="ollama.api_key"
-                                    data-section="ollama" data-key="api_key"
-                                    placeholder="{% if secret_flags.get('ollama.api_key') %}•••••••• (leave blank to keep current key){% else %}leave blank for local Ollama{% endif %}">
-                                <small class="form-text text-muted">Required for Open WebUI (generate in Settings >
-                                    Account > API Keys). Optional for local Ollama without authentication.</small>
-                            </div>
+                            <h5>Provider configuration</h5>
+                            <p class="text-muted">Providers are the sections below that declare a <code>BASE</code>
+                                url (stinkyserver, stinkyserver-nano, stinkyembed, ollama, openai). Add a section to
+                                add a provider. naviDJ uses the <code>[llm]</code> defaults unless a run overrides them.</p>
                         </div>
 
-                        <div id="customConfig" class="config-section mb-2" style="display: none;">
-                            <h5>Custom API Configuration</h5>
-                            <div class="mb-3">
-                                <label class="form-label">Custom API Base URL</label>
-                                <input type="text" class="form-control" name="custom.base_url"
-                                    value="{{ config.get('custom', 'base_url', fallback='') }}" data-section="custom"
-                                    data-key="base_url" placeholder="https://your-api-endpoint.com/v1">
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">Custom API Key</label>
-                                <input type="password" class="form-control" name="custom.api_key"
-                                    data-section="custom" data-key="api_key"
-                                    placeholder="{% if secret_flags.get('custom.api_key') %}•••••••• (leave blank to keep current key){% else %}enter your custom API key{% endif %}">
-                            </div>
+                        <div id="customConfig" class="config-section mb-2" style="display: none;"></div>
                         </div>
 
                         <!-- Other Configuration Sections -->

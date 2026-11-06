@@ -29,7 +29,7 @@ from tqdm import tqdm, trange
 HTTP_TIMEOUT = 15
 
 # Load secrets from secrets.txt
-secrets = configparser.ConfigParser()
+secrets = configparser.ConfigParser(interpolation=None)
 secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 
 SPOTIFY_SCOPE = secrets.get("spotify", "SCOPE", fallback=None)

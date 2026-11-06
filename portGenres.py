@@ -28,7 +28,7 @@ from mutagen import File as MutagenFile
 import unicodedata
 
 # Load secrets from secrets.txt (if needed for future API keys)
-secrets = configparser.ConfigParser()
+secrets = configparser.ConfigParser(interpolation=None)
 secrets.read(os.path.join(os.path.dirname(__file__), "secrets.txt"))
 
 # --------------- Paths & config ---------------
