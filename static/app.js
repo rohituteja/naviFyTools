@@ -31,22 +31,12 @@ document.getElementById('configForm').addEventListener('submit', async (e) => {
 let currentLlmMode = 'openai';
 let currentLlmModel = '';
 let currentEmbeddingModel = '';
+let embeddingProvider = 'stinkyembed';
 
 // Function to show/hide API configuration sections
-function toggleApiConfig(mode) {
-    // Hide all config sections
-    document.getElementById('openaiConfig').style.display = 'none';
-    document.getElementById('ollamaConfig').style.display = 'none';
-    document.getElementById('customConfig').style.display = 'none';
-    
-    // Show the selected config section
-    if (mode === 'openai') {
-        document.getElementById('openaiConfig').style.display = 'block';
-    } else if (mode === 'ollama') {
-        document.getElementById('ollamaConfig').style.display = 'block';
-    } else if (mode === 'custom') {
-        document.getElementById('customConfig').style.display = 'block';
-    }
+function toggleApiConfig() {
+    // 2026-11-06: providers are secrets sections, configured by the generic
+    // section list below — there is no per-provider panel to toggle any more.
 }
 
 // Function to fetch and populate models
@@ -102,17 +92,18 @@ async function fetchEmbeddingModels(apiType) {
     const embeddingContainer = document.getElementById('embeddingModelContainer');
     
     // Show/hide based on API type
-    if (apiType === 'ollama' || apiType === 'openai') {
+    if (apiType) {
         embeddingContainer.style.display = 'block';
         embeddingSelect.innerHTML = '<option value="">Loading models...</option>';
         
         // Update the name attribute based on API type
-        embeddingSelect.name = `${apiType}.embedding_model`;
-        embeddingSelect.setAttribute('data-section', apiType);
+        // embeddings are saved as [llm] defaults; the provider is [llm] embedding_provider
+        embeddingSelect.name = 'llm.embedding_model';
+        embeddingSelect.setAttribute('data-section', 'llm');
         embeddingSelect.setAttribute('data-key', 'embedding_model');
         
         try {
-            const response = await fetch(`/get_embedding_models/${apiType}`);
+            const response = await fetch(`/get_embedding_models/${embeddingProvider || apiType}`);
             const result = await response.json();
             
             if (result.error) {
@@ -981,6 +972,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 if (config.llm && config.llm.model) {
                     currentLlmModel = config.llm.model;
+                }
+                if (config.llm && config.llm.embedding_provider) {
+                    embeddingProvider = config.llm.embedding_provider;
                 }
                 
                 // Set thinking toggle state

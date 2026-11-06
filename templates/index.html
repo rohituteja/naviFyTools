@@ -41,13 +41,10 @@
                             <div class="row">
                                 <div class="col-md-4 mb-3">
                                     <label class="form-label">LLM Mode</label>
-                                    <select class="form-control" id="llmModeSelect" name="llm.mode">
-                                        <option value="openai" {% if config.get('llm', 'mode' , fallback='' )=='openai'
-                                            %}selected{% endif %}>OpenAI</option>
-                                        <option value="ollama" {% if config.get('llm', 'mode' , fallback='' )=='ollama'
-                                            %}selected{% endif %}>Ollama</option>
-                                        <option value="custom" {% if config.get('llm', 'mode' , fallback='' )=='custom'
-                                            %}selected{% endif %}>Custom API</option>
+                                    <select class="form-control" id="llmModeSelect" name="llm.provider">
+                                        {% for p in providers %}
+                                        <option value="{{ p.id }}" {% if config.get('llm','provider',fallback='')==p.id %}selected{% endif %}>{{ p.label }}{% if p.role == 'embedding' %} (embedding){% endif %}</option>
+                                        {% endfor %}
                                     </select>
                                 </div>
                                 <div class="col-md-4 mb-3">

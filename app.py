@@ -312,7 +312,7 @@ def index():
         return spotify_callback()
 
     config, secret_flags = masked_secrets()
-    return render_template('index.html', config=config, secret_flags=secret_flags)
+    return render_template('index.html', config=config, secret_flags=secret_flags, providers=list_providers(config))
 
 @app.route('/update_config', methods=['POST'])
 def update_config():
